@@ -14,7 +14,7 @@ import bot.handlers as h
 
 class FakeMessage:
     """Minimal stand-in for pyrogram.types.Message."""
-    def __init__(self, text, user_id=8415744410, chat_id=123):
+    def __init__(self, text, user_id=111222333, chat_id=123):
         self.text = text
         self.id = id(self)
         self.from_user = MagicMock(id=user_id)
@@ -48,7 +48,7 @@ def reset_state():
 class TestFlow:
     async def test_link_sets_quality_pending(self):
         """Sending a link should extract info and set a quality pending state."""
-        user_id = 8415744410
+        user_id = 111222333
         msg = FakeMessage("https://youtube.com/watch?v=test", user_id=user_id)
         client = MagicMock()
         wl = make_whitelist(user_id)
@@ -66,7 +66,7 @@ class TestFlow:
 
     async def test_number_after_link_triggers_download(self):
         """After a link, sending '2' should trigger download with 720p."""
-        user_id = 8415744410
+        user_id = 111222333
         h._set_pending(user_id, {
             "type": "quality", "url": "https://test.url", "title": "Test",
         })
@@ -87,7 +87,7 @@ class TestFlow:
 
     async def test_plaintext_number_without_pending_is_ignored(self):
         """A number with no pending menu must NOT crash and must not download."""
-        user_id = 8415744410
+        user_id = 111222333
         msg = FakeMessage("2", user_id=user_id)
         client = MagicMock()
         client.send_video = AsyncMock()
@@ -99,7 +99,7 @@ class TestFlow:
 
     async def test_new_link_clears_old_pending(self):
         """A new link should replace any old pending state."""
-        user_id = 8415744410
+        user_id = 111222333
         h._set_pending(user_id, {"type": "quality", "url": "https://old", "title": "old"})
         msg = FakeMessage("https://new.url", user_id=user_id)
         client = MagicMock()
@@ -113,7 +113,7 @@ class TestFlow:
 
     async def test_invalid_quality_prompts_again(self):
         """Sending '9' (invalid) should ask again, not crash."""
-        user_id = 8415744410
+        user_id = 111222333
         h._set_pending(user_id, {"type": "quality", "url": "https://x", "title": "x"})
         msg = FakeMessage("9", user_id=user_id)
         client = MagicMock()
@@ -127,7 +127,7 @@ class TestFlow:
 
     async def test_playlist_link_sets_playlist_pending(self):
         """A playlist link sets a playlist pending state."""
-        user_id = 8415744410
+        user_id = 111222333
         msg = FakeMessage("https://youtube.com/playlist?list=x", user_id=user_id)
         client = MagicMock()
         wl = make_whitelist(user_id)
@@ -151,6 +151,6 @@ class TestFlow:
         wl.is_authorized.return_value = False
 
         with patch("bot.handlers.extract_info") as mock_extract:
-            await h.on_message(client, msg, wl, channel_id=-100, owner_id=8415744410)
+            await h.on_message(client, msg, wl, channel_id=-100, owner_id=111222333)
             assert not mock_extract.called
             assert not msg.reply_text.called
