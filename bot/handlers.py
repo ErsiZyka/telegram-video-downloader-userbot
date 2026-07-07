@@ -28,6 +28,7 @@ from bot.downloader import (
 )
 from bot.history import DownloadHistory
 from bot.fasttelethon import upload_file
+from bot.queue import DownloadQueue
 
 URL_REGEX = r"(https?://[^\s]+)"
 
@@ -39,6 +40,12 @@ _pending: dict[int, dict] = {}
 PENDING_TIMEOUT = 600
 
 _history: DownloadHistory | None = None
+
+_queue: DownloadQueue | None = None
+_current_item: dict | None = None
+_queue_worker_task: asyncio.Task | None = None
+_resume_event: asyncio.Event | None = None
+_resume_decision: str | None = None  # "yes" | "no"
 
 QUALITY_CHOICES = {
     "1": ("360p", "360"),
@@ -61,6 +68,13 @@ def _get_history() -> DownloadHistory:
     if _history is None:
         _history = DownloadHistory(filepath="data/download_history.json")
     return _history
+
+
+def _get_queue() -> DownloadQueue:
+    global _queue
+    if _queue is None:
+        _queue = DownloadQueue(filepath="data/queue.json")
+    return _queue
 
 
 def _log(msg: str) -> None:
@@ -418,6 +432,83 @@ async def download_and_upload(
         pass
 
 
+# ─── Queue worker ───
+
+async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
+    """Process the queue sequentially: peek -> download+upload -> remove.
+
+    Uses peek()+remove() (NOT pop()): an item is removed only after the
+    worker finishes handling it. If the bot crashes mid-download, the item
+    remains in the queue and is reprocessed on next startup (yt-dlp resumes
+    .part files). Removed regardless of outcome (ok/error/cancelled) — only
+    a crash leaves it, by design.
+    """
+    global _current_item
+    queue = _get_queue()
+    _log("Queue worker avviato")
+    while True:
+        item = queue.peek()
+        if item is None:
+            _current_item = None
+            await asyncio.sleep(2)  # coda vuota, polling leggero
+            continue
+        _current_item = item
+        url = item["url"]
+        quality = item.get("quality", "720")
+        title = item.get("title", "Video")
+        _log(f"Worker processa: {url} [{quality}]")
+        try:
+            status_msg = await client.send_message(
+                owner_id, f"⏳ Avvio download: **{_escape_md(title)}** [{quality}]..."
+            )
+            await download_and_upload(
+                client, status_msg, url, quality, title, channel_id, owner_id
+            )
+        except Exception as e:
+            _log(f"Worker errore inatteso su {url}: {e!r}")
+        finally:
+            # Always remove: the item has been handled (ok/error/cancelled).
+            # If we crashed before reaching here, the item stays — that's the
+            # crash-safe property; on restart it gets reprocessed.
+            queue.remove(url)
+            _current_item = None
+
+
+async def start_queue_worker(client, channel_id: int, owner_id: int) -> None:
+    """Called once at startup. Handles the resume prompt, then starts worker.
+
+    If the queue has items from a previous run, asks the owner whether to
+    resume. Only on "no" does it delete partial files and clear the queue
+    (the conditional cleanup — destructive cleanup is deferred to user choice).
+    On "yes" (or empty queue) the worker starts; yt-dlp resumes .part files.
+    """
+    global _resume_event, _resume_decision, _queue_worker_task
+    queue = _get_queue()
+    if queue.is_empty():
+        # Truly orphan files (no queue items) -> safe to clean now.
+        cleanup_orphan_files()
+    else:
+        lines = ["📥 Ci sono download in coda dal precedente avvio:\n"]
+        for i, it in enumerate(queue.items, 1):
+            lines.append(f"{i}. {_escape_md((it.get('title') or 'Sconosciuto')[:55])} [{it.get('quality','?')}]")
+        lines.append("\nScrivi `si` per riprendere (i file parziali verranno continuati) "
+                     "o `no` per annullare e pulire.")
+        await client.send_message(owner_id, "\n".join(lines))
+        _resume_event = asyncio.Event()
+        _set_pending(owner_id, {"type": "confirm_resume"})
+        await _resume_event.wait()
+        decision = _resume_decision
+        _resume_event = None
+        _resume_decision = None
+        if decision == "no":
+            cleanup_orphan_files()
+            queue.clear()
+            await client.send_message(owner_id, "📭 Coda svuotata e file parziali rimossi.")
+        else:
+            await client.send_message(owner_id, "▶️ Riprendo la coda...")
+    _queue_worker_task = asyncio.create_task(_queue_worker(client, channel_id, owner_id))
+
+
 # ─── Upload existing file (no re-download) ───
 
 async def _upload_existing(
@@ -575,6 +666,24 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
 async def _handle_selection(client, event, user_id: int, text: str, pending: dict, channel_id: int) -> None:
     text_lower = text.lower().strip()
 
+    if pending["type"] == "confirm_resume":
+        global _resume_decision
+        _clear_pending(user_id)
+        _resume_decision = "yes" if text_lower in ("si", "sì", "yes", "y") else "no"
+        if _resume_event is not None:
+            _resume_event.set()
+        return
+
+    if pending["type"] == "confirm_clean":
+        _clear_pending(user_id)
+        if text_lower in ("si", "sì", "yes", "y"):
+            queue = _get_queue()
+            n = queue.clear()
+            await _safe_reply(event, f"🧹 Coda svuotata ({n} item rimossi).")
+        else:
+            await _safe_reply(event, "👌 Operazione annullata.")
+        return
+
     if pending["type"] == "confirm_retry":
         if text_lower in ("si", "sì", "yes", "y"):
             action = pending["action"]
@@ -659,8 +768,14 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
         title = pending["title"]
         _clear_pending(user_id)
         _log(f"Qualità scelta da {user_id}: {quality}")
-        status_msg = await _safe_reply(event, f"⏳ Avvio download in qualità **{label}**...")
-        await download_and_upload(client, status_msg, url, quality, title, channel_id, event.sender_id)
+        queue = _get_queue()
+        pos = queue.add(url, quality, title)
+        if _current_item is None and pos == 1:
+            await _safe_reply(event, f"⏳ Avvio download in qualità **{label}**...")
+        else:
+            await _safe_reply(event,
+                f"📥 Aggiunto alla coda (posizione {pos}). "
+                f"Verrà scaricato al termine di quello in corso.")
         return
 
 
@@ -777,14 +892,21 @@ async def cmd_channel(client, event, channel_id: int) -> None:
 
 
 async def cmd_status(client, event):
-    await _safe_reply(event, f"📊 Download in corso: {'sì' if _is_downloading else 'no'}")
+    queue = _get_queue()
+    pending = len(queue.items)
+    if _current_item is not None:
+        line = f"📊 In corso: **{_escape_md((_current_item.get('title') or '')[:55])}**"
+    else:
+        line = "📊 Nessun download in corso."
+    line += f"\n📋 In coda: {pending}"
+    await _safe_reply(event, line)
 
 
 async def cmd_stop(client, event, owner_id: int) -> None:
     global _cancel_requested
     if event.sender_id != owner_id:
         return
-    if _is_downloading:
+    if _current_item is not None:
         _cancel_requested = True
         _log("Stop richiesto dall'utente")
         replied = await _safe_reply(event, "🛑 Interruzione richiesta...")
