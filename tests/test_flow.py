@@ -12,6 +12,20 @@ sys.path.insert(0, ".")
 import bot.handlers as h
 
 
+def test_history_filepath_not_corrupted():
+    """Regression: _get_history() must use the correct filepath (not corrupted by sed)."""
+    hist = h._get_history()
+    assert hist.filepath == "data/download_history.json", \
+        f"filepath corrotto: {hist.filepath}"
+
+
+def test_upload_existing_accepts_url():
+    """Regression: _upload_existing must accept a url parameter."""
+    import inspect
+    sig = inspect.signature(h._upload_existing)
+    assert "url" in sig.parameters
+
+
 class FakeMessage:
     """Minimal stand-in for pyrogram.types.Message."""
     def __init__(self, text, user_id=111222333, chat_id=123):

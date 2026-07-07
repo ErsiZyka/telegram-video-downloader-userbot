@@ -49,7 +49,7 @@ _history: DownloadHistory | None = None
 def _get_history() -> DownloadHistory:
     global _history
     if _history is None:
-        _history = DownloadHistory(filepath="data/download_get_history().json")
+        _history = DownloadHistory(filepath="data/download_history.json")
     return _history
 
 # ─── Quality selection map (number -> (label, quality_key)) ───
@@ -384,6 +384,7 @@ async def _upload_existing(
     filepath: str,
     title: str,
     channel_id: int,
+    url: str = "",
     max_retries: int = 2,
 ) -> None:
     """Upload a file that was already downloaded, with progress bar."""
@@ -487,13 +488,16 @@ async def _process_link(client: Client, message: Message, url: str, channel_id: 
     entry = _get_history().get(url)
     if entry:
         status = entry.get("status")
+        title = entry.get("title", "")
+        ts = entry.get("ts", 0)
+        date_str = time_module.strftime("%d/%m/%Y", time_module.localtime(ts)) if ts else "?"
         if status == "ok":
             filepath = entry.get("filepath", "")
-            title = entry.get("title", "")
             if os.path.exists(filepath):
+                # File still on disk → offer re-upload without re-downloading
                 await message.reply_text(
-                    f"📂 **{_escape_md(title)}** è già stato scaricato.\n"
-                    f"Scrivi `si` per caricarlo subito sul canale (senza riscaricare), o `no` per annullare."
+                    f"📂 **{_escape_md(title)}** giá scaricato (uploadato il {date_str}).\n"
+                    f"Scrivi `si` per ricaricarlo subito (senza riscaricare), o `no` per annullare."
                 )
                 _set_pending(user_id, {
                     "type": "confirm_retry",
@@ -503,11 +507,21 @@ async def _process_link(client: Client, message: Message, url: str, channel_id: 
                     "url": url,
                 })
                 return
-            # File exists in history but was deleted (cleanup) — re-download normally
-            _get_history().remove(url)
+            else:
+                # File cleaned up → warn and offer re-download
+                await message.reply_text(
+                    f"📂 **{_escape_md(title)}** é giá stato uploadato il {date_str} (file rimosso dal disco).\n"
+                    f"Scrivi `si` per riscaricarlo e ricaricarlo, o `no` per annullare."
+                )
+                _set_pending(user_id, {
+                    "type": "confirm_retry",
+                    "action": "retry_download",
+                    "url": url,
+                    "title": title,
+                })
+                return
         elif status == "error":
             err = entry.get("error", "errore sconosciuto")
-            title = entry.get("title", "")
             await message.reply_text(
                 f"⚠️ Questo link ha dato errore in precedenza: _{err}_\n"
                 f"Scrivi `si` per riprovare o `no` per annullare."
@@ -558,10 +572,11 @@ async def _handle_selection(
                 # Upload existing file without re-downloading
                 filepath = pending["filepath"]
                 title = pending["title"]
+                url = pending.get("url", "")
                 _clear_pending(user_id)
                 _log(f"Re-upload richiesto: {filepath}")
                 status_msg = await message.reply_text(f"📤 Invio file esistente: **{_escape_md(title)}**...")
-                await _upload_existing(client, status_msg, filepath, title, channel_id)
+                await _upload_existing(client, status_msg, filepath, title, channel_id, url)
             elif action == "retry_download":
                 # Retry the full download process
                 url = pending["url"]

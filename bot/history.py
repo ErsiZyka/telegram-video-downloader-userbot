@@ -31,18 +31,23 @@ class DownloadHistory:
 
     def _save(self, data: dict[str, dict]) -> None:
         dirname = os.path.dirname(self.filepath)
+        tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".json", dir=dirname, delete=False, encoding="utf-8",
             ) as tmp:
                 json.dump(data, tmp, indent=2, ensure_ascii=False)
-            os.replace(tmp.name, self.filepath)
-        except (PermissionError, OSError):
-            # Clean up temp file and bail
-            try:
-                os.unlink(tmp.name)
-            except Exception:
-                pass
+                tmp_path = tmp.name
+            os.replace(tmp_path, self.filepath)
+            tmp_path = None  # success, no cleanup needed
+        except (PermissionError, OSError) as e:
+            # Clean up temp file if it was created, then bail
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+            self._data = data  # keep in memory even if save fails
 
     def get(self, url: str) -> dict | None:
         """Return history entry for a URL, or None."""
