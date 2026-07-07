@@ -848,12 +848,31 @@ async def cmd_stop(client: Client, message: Message, owner_id: int) -> None:
     global _cancel_requested
     if _is_downloading:
         _cancel_requested = True
-        await _safe_reply(message, "🛑 Interruzione richiesta... il processo verrà fermato al prossimo ciclo.")
         _log("Stop richiesto dall'utente")
+        # Try immediate reply; if FloodWait, schedule a delayed confirmation
+        replied = await _safe_reply(message, "🛑 Interruzione richiesta... il processo verrà fermato al prossimo ciclo.")
+        if replied is None:
+            # We're in FloodWait — schedule a delayed confirmation
+            wait = max(0, _edit_muted_until - time_module.time())
+            asyncio.create_task(_delayed_reply(message, wait, "🛑 Stop ricevuto. Processo fermato."))
     else:
-        # Nothing in progress: just clean any leftover files
         removed = cleanup_orphan_files()
-        await _safe_reply(message, f"📭 Nessun download in corso. Puliti {len(removed)} file residui.")
+        replied = await _safe_reply(message, f"📭 Nessun download in corso. Puliti {len(removed)} file residui.")
+        if replied is None:
+            wait = max(0, _edit_muted_until - time_module.time())
+            asyncio.create_task(_delayed_reply(message, wait, "📭 Stop ricevuto (nessun download in corso)."))
+
+
+async def _delayed_reply(message: Message, wait: float, text: str) -> None:
+    """Wait out a FloodWait, then send a reply. Ensures /stop always gets a response."""
+    if wait > 0:
+        _log(f"Conferma posticipata di {wait:.0f}s (FloodWait)")
+        await asyncio.sleep(wait)
+    try:
+        await message.reply_text(text)
+        _log("Conferma ritardata inviata")
+    except Exception as e:
+        _log(f"Conferma ritardata fallita: {e!r}")
 
 
 # ─── Handler registration ───
