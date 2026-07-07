@@ -692,11 +692,21 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
                 title = pending["title"]
                 url = pending.get("url", "")
                 _clear_pending(user_id)
+                # Remove history entry so we don't hit confirm_retry loop on next link
+                try:
+                    _get_history().remove(url)
+                except Exception:
+                    pass
                 status_msg = await _safe_reply(event, f"📤 Invio file esistente: **{_escape_md(title)}**...")
                 await _upload_existing(client, event, status_msg, filepath, title, channel_id, url)
             elif action == "retry_download":
                 url = pending["url"]
                 _clear_pending(user_id)
+                # Remove history entry so _process_link doesn't loop again
+                try:
+                    _get_history().remove(url)
+                except Exception:
+                    pass
                 await _process_link(client, event, url, channel_id)
             else:
                 _clear_pending(user_id)
