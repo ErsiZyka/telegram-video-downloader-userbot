@@ -25,6 +25,7 @@ from bot.downloader import (
     format_eta,
     cleanup_orphan_files,
 )
+from bot.history import DownloadHistory
 
 URL_REGEX = r"(https?://[^\s]+)"
 
@@ -35,6 +36,16 @@ _is_downloading = False
 # user_id -> {"type": "quality"|"playlist", ..., "ts": timestamp}
 _pending: dict[int, dict] = {}
 PENDING_TIMEOUT = 600  # 10 minutes
+
+# ─── Download history (persistent URL → outcome cache, lazy init) ───
+_history: DownloadHistory | None = None
+
+
+def _get_history() -> DownloadHistory:
+    global _history
+    if _history is None:
+        _history = DownloadHistory(filepath="data/download_get_history().json")
+    return _history
 
 # ─── Quality selection map (number -> (label, quality_key)) ───
 QUALITY_CHOICES = {
@@ -210,6 +221,10 @@ async def download_and_upload(
                 _log(f"Errore imprevisto download (tentativo {attempt}): {download_error}")
                 cleanup_orphan_files()
                 await _safe_edit(status_msg, f"❌ Download fallito: {e}")
+                try:
+                    _get_history().set_error(url, str(e), title)
+                except Exception:
+                    pass
                 return
 
         if filepath is None:
@@ -218,6 +233,10 @@ async def download_and_upload(
                 status_msg,
                 f"❌ Download fallito dopo {max_retries} tentativi.\nErrore: {download_error}",
             )
+            try:
+                _get_history().set_error(url, download_error or "download fallito", title)
+            except Exception:
+                pass
             return
 
         # ─── Size check (Telegram 2GB limit) ───
@@ -301,10 +320,133 @@ async def download_and_upload(
         _is_downloading = False
 
 
+# ─── Upload an existing file (no re-download) ───
+
+async def _upload_existing(
+    client: Client,
+    status_msg: Message,
+    filepath: str,
+    title: str,
+    channel_id: int,
+    max_retries: int = 2,
+) -> None:
+    """Upload a file that was already downloaded, with progress bar."""
+    import time as time_module
+    loop = asyncio.get_running_loop()
+
+    if not os.path.exists(filepath):
+        await _safe_edit(status_msg, "❌ File non più presente su disco. Rimanda il link per riscaricarlo.")
+        return
+
+    file_size_bytes = os.path.getsize(filepath)
+    file_size_mb = file_size_bytes / (1024 * 1024)
+    file_size_gb = file_size_mb / 1024
+
+    if file_size_gb > 2:
+        await _safe_edit(status_msg, f"❌ File troppo grande ({file_size_gb:.1f} GB).")
+        return
+
+    caption = _escape_md(title) if title else "Video"
+    upload_success = False
+    upload_error = None
+    last_progress = 0.0
+
+    def upload_progress(current: int, total: int) -> None:
+        nonlocal last_progress
+        now = time_module.time()
+        if now - last_progress < 2:
+            return
+        last_progress = now
+        pct = (current / total * 100) if total > 0 else 0
+        asyncio.run_coroutine_threadsafe(
+            _safe_edit(status_msg,
+                f"📤 Upload {format_size(current/(1024*1024))} / {format_size(total/(1024*1024))} · {pct:.0f}%"),
+            loop,
+        )
+
+    await _safe_edit(status_msg, f"📤 Upload in corso: **{_escape_md(title)}** ({format_size(file_size_mb)})...")
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                await _safe_edit(status_msg, f"📤 Upload (tentativo {attempt}/{max_retries})...")
+            await client.send_video(
+                chat_id=channel_id, video=filepath, caption=caption,
+                supports_streaming=True, progress=upload_progress,
+            )
+            upload_success = True
+            _log("Upload esistente completato")
+            break
+        except FloodWait as e:
+            _log(f"FloodWait upload: {e.value}s")
+            await asyncio.sleep(e.value)
+        except Exception as e:
+            upload_error = repr(e)
+            _log(f"Upload tentativo {attempt} fallito: {upload_error}")
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** (attempt - 1))
+
+    if upload_success:
+        await _safe_edit(status_msg, "✅ Video inviato con successo al canale!")
+        # Record success in history
+        try:
+            _get_history().set_success(url, filepath, title)
+        except Exception as e:
+            _log(f"history save failed: {e!r}")
+    else:
+        await _safe_edit(
+            status_msg,
+            f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}",
+        )
+        try:
+            _get_history().set_error(url, upload_error or "upload fallito", title)
+        except Exception:
+            pass
+
+
 # ─── Process a new link ───
 
 async def _process_link(client: Client, message: Message, url: str, channel_id: int) -> None:
     user_id = message.from_user.id
+
+    # ─── Check download history ───
+    entry = _get_history().get(url)
+    if entry:
+        status = entry.get("status")
+        if status == "ok":
+            filepath = entry.get("filepath", "")
+            title = entry.get("title", "")
+            if os.path.exists(filepath):
+                await message.reply_text(
+                    f"📂 **{_escape_md(title)}** è già stato scaricato.\n"
+                    f"Scrivi `si` per caricarlo subito sul canale (senza riscaricare), o `no` per annullare."
+                )
+                _set_pending(user_id, {
+                    "type": "confirm_retry",
+                    "action": "reupload",
+                    "filepath": filepath,
+                    "title": title,
+                    "url": url,
+                })
+                return
+            # File exists in history but was deleted (cleanup) — re-download normally
+            _get_history().remove(url)
+        elif status == "error":
+            err = entry.get("error", "errore sconosciuto")
+            title = entry.get("title", "")
+            await message.reply_text(
+                f"⚠️ Questo link ha dato errore in precedenza: _{err}_\n"
+                f"Scrivi `si` per riprovare o `no` per annullare."
+            )
+            _set_pending(user_id, {
+                "type": "confirm_retry",
+                "action": "retry_download",
+                "url": url,
+                "title": title,
+            })
+            return
+
+    # ─── Normal flow: extract info ───
     status_msg = await message.reply_text("🔍 Analisi del link in corso...")
     try:
         loop = asyncio.get_running_loop()
@@ -333,6 +475,32 @@ async def _handle_selection(
     client: Client, message: Message, user_id: int, text: str, pending: dict, channel_id: int,
 ) -> None:
     text_lower = text.lower().strip()
+
+    # ─── Confirm retry (si/no for duplicate/error links) ───
+    if pending["type"] == "confirm_retry":
+        if text_lower in ("si", "sì", "yes", "y"):
+            action = pending["action"]
+            if action == "reupload":
+                # Upload existing file without re-downloading
+                filepath = pending["filepath"]
+                title = pending["title"]
+                _clear_pending(user_id)
+                _log(f"Re-upload richiesto: {filepath}")
+                status_msg = await message.reply_text(f"📤 Invio file esistente: **{_escape_md(title)}**...")
+                await _upload_existing(client, status_msg, filepath, title, channel_id)
+            elif action == "retry_download":
+                # Retry the full download process
+                url = pending["url"]
+                _clear_pending(user_id)
+                _log(f"Retry download: {url}")
+                status_msg = await message.reply_text("🔍 Analisi del link in corso...")
+                await _process_link(client, message, url, channel_id)
+            else:
+                _clear_pending(user_id)
+        else:
+            _clear_pending(user_id)
+            await message.reply_text("👌 Operazione annullata.")
+        return
 
     # ─── Playlist menu ───
     if pending["type"] == "playlist":

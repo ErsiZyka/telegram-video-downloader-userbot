@@ -28,6 +28,7 @@ from bot.client import create_client
 from bot.whitelist import Whitelist
 from bot.handlers import register_handlers
 from bot.downloader import check_dependencies, cleanup_orphan_files
+from bot.history import DownloadHistory
 
 
 def _load_config() -> dict:
@@ -95,6 +96,12 @@ async def main() -> None:
     removed = cleanup_orphan_files(download_dir)
     if removed:
         print(f"Puliti {len(removed)} file orfani da {download_dir}")
+
+    # ─── Cleanup orphan history entries ───
+    history = DownloadHistory(filepath="data/download_history.json")
+    removed_h = history.clear_orphan_entries(download_dir)
+    if removed_h:
+        print(f"Pulite {removed_h} entry orfane dalla cronologia")
 
     # ─── Initialize whitelist ───
     whitelist = Whitelist(filepath="data/whitelist.json")
