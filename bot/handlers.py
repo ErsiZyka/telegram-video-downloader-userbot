@@ -79,8 +79,10 @@ def _get_queue() -> DownloadQueue:
 
 
 def _log(msg: str) -> None:
+    """Emit a log line through the centralized logger (timestamped, file + console)."""
     try:
-        print(f"[bot] {msg}", flush=True)
+        from bot.logging_config import bot_log
+        bot_log(msg)
     except Exception:
         pass
 

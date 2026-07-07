@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 
 from playwright.async_api import async_playwright, Error as PlaywrightError
 
+from bot.logging_config import get_logger
+
+_log = get_logger("extractor")
+
 
 @dataclass
 class VideoInfo:
@@ -103,11 +107,13 @@ class PlaywrightVideoExtractor(BaseExtractor):
                 return
             if _is_stream_response(u, ct):
                 video_url = u
+                _log.info("Stream intercettato: %s", u[:100])
                 if not future.done():
                     future.set_result(u)
 
         try:
             async with async_playwright() as p:
+                _log.info("Avvio Chromium headless per %s", url)
                 browser = await p.chromium.launch(
                     headless=True,
                     args=["--disable-blink-features=AutomationControlled"],
@@ -132,8 +138,9 @@ class PlaywrightVideoExtractor(BaseExtractor):
                 )
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                except PlaywrightError:
-                    pass
+                    _log.info("Pagina caricata: %s", url)
+                except PlaywrightError as e:
+                    _log.warning("goto timeout/errore (procedo): %s", e)
                 for fr in page.frames:
                     fr.on("response", _on_response)
 
@@ -146,20 +153,24 @@ class PlaywrightVideoExtractor(BaseExtractor):
                 # player frame. Use JS evaluate() to click (bypasses the
                 # 'element is outside the viewport' check that breaks headless).
                 if video_url is None:
+                    _log.info("Attesa render player (%ds)...", self.RENDER_WAIT)
                     await asyncio.sleep(self.RENDER_WAIT)
+                    _log.info("Click play button...")
                     await self._click_play(page)
                     try:
                         await asyncio.wait_for(future, timeout=self.AFTER_CLICK_WAIT)
                     except asyncio.TimeoutError:
-                        pass
+                        _log.warning("Nessuno stream entro %ds dopo il click", self.AFTER_CLICK_WAIT)
 
                 await context.close()
                 await browser.close()
         except PlaywrightError as e:
+            _log.error("Browser error: %s", e)
             raise RuntimeError(f"Browser error: {e}") from e
 
         if video_url is None:
             raise RuntimeError("Nessuno stream video trovato entro il timeout.")
+        _log.info("Stream trovato: %s", video_url[:100])
         return VideoInfo(url=video_url, title=title, headers=dict(_STREAM_HEADERS))
 
     async def _click_play(self, page) -> None:

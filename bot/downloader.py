@@ -52,6 +52,12 @@ def format_eta(seconds: int | None | float) -> str:
 import yt_dlp
 import os
 import re
+import subprocess
+import json
+
+from bot.logging_config import get_logger
+
+_log = get_logger("downloader")
 
 
 # Some yt-dlp extractors only match specific subdomains (e.g. YouPorn matches
@@ -186,6 +192,7 @@ def probe_video_metadata(filepath: str) -> tuple[int, int, int]:
                 duration = float(stream.get("duration", 0) or 0)
                 width = int(stream.get("width", 0) or 0)
                 height = int(stream.get("height", 0) or 0)
+                _log.info("ffprobe: %dx%d %ds", width, height, int(duration))
                 return (int(duration), width, height)
     except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
         pass
@@ -253,6 +260,7 @@ def download_video(
         raise ValueError(f"Qualità non valida: {quality}. Usa: {list(QUALITY_FORMATS.keys())}")
 
     format_str = QUALITY_FORMATS[quality]
+    _log.info("Download richiesto: %s qualità=%s format=%s", url[:80], quality, format_str)
     output_template = os.path.join("downloads", "%(title).100s.%(ext)s")
 
     def _make_progress_hook():
@@ -304,6 +312,7 @@ def download_video(
                     elif os.path.exists(base + ".mkv"):
                         filename = base + ".mkv"
 
+                _log.info("Download completato: %s", filename)
                 return filename
 
         except yt_dlp.utils.DownloadError as e:
@@ -312,6 +321,7 @@ def download_video(
             # and don't have a 360p variant. If the requested quality is not
             # available, fall back to "best" once so the user still gets a video.
             if "Requested format is not available" in last_error and ydl_opts.get("format") != "best":
+                _log.warning("Formato non disponibile, fallback a 'best' per %s", url[:80])
                 fallback_opts = dict(ydl_opts)
                 fallback_opts["format"] = "best"
                 try:
