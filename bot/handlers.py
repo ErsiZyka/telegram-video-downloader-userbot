@@ -345,9 +345,8 @@ async def download_and_upload(
             eta = remaining / (delta_bytes / delta_t) if delta_bytes > 0 and delta_t > 0 else 0
             tracker.prev_bytes = current
             tracker.prev_ts = now
-            # Slow-upload detection: after 10MB uploaded, if speed < 0.4 MB/s, retry with fresh connection
-            if current > 10 * 1024 * 1024 and speed_mbps > 0 and speed_mbps < 0.4:
-                raise SlowUploadError(f"velocità troppo bassa ({speed_mbps:.2f} MB/s)")
+            # Note: we do NOT abort on slow speed — raising from the progress
+            # callback corrupts Pyrogram's internal upload state. Let it run.
             text = (
                 f"✅ Download completato ({format_size(file_size_mb)})\n"
                 f"📤 Upload {fmt_sz(current/(1024*1024))} / {fmt_sz(total/(1024*1024))} · {pct:.0f}%"
