@@ -259,27 +259,34 @@ async def download_and_upload(
         upload_success = False
         upload_error = None
         last_upload_progress = 0.0
-        _up_prev = {"bytes": 0, "ts": 0.0}
+
+        class _UpTracker:
+            prev_bytes: int = 0
+            prev_ts: float = 0.0
+            last_update: float = 0.0
+
+        tracker = _UpTracker()
 
         def upload_progress(current: int, total: int) -> None:
-            """Called by Pyrogram during upload; update status message."""
-            nonlocal last_upload_progress, _up_prev
+            nonlocal last_upload_progress
             now = time_module.time()
             if now - last_upload_progress < 2:
                 return
             last_upload_progress = now
             pct = (current / total * 100) if total > 0 else 0
-            delta_bytes = current - _up_prev["bytes"]
-            delta_t = now - _up_prev["ts"] if _up_prev["ts"] else 0
-            speed_mbps = (delta_bytes / delta_t / 1024 / 1024) if delta_t > 0 else 0
+            delta_bytes = current - tracker.prev_bytes
+            delta_t = now - tracker.prev_ts if tracker.prev_ts else 0
+            speed_mbps = (delta_bytes / delta_t / 1024 / 1024) if delta_t > 0 and delta_bytes > 0 else 0
             remaining = total - current
             eta = remaining / (delta_bytes / delta_t) if delta_bytes > 0 and delta_t > 0 else 0
-            _up_prev = {"bytes": current, "ts": now}
+            tracker.prev_bytes = current
+            tracker.prev_ts = now
             text = (
                 f"✅ Download completato ({format_size(file_size_mb)})\n"
-                f"📤 Upload {fmt_sz(current/(1024*1024))} / {fmt_sz(total/(1024*1024))} · {pct:.0f}%\n"
-                f"▫️ Velocità: {format_speed(speed_mbps)}"
+                f"📤 Upload {fmt_sz(current/(1024*1024))} / {fmt_sz(total/(1024*1024))} · {pct:.0f}%"
             )
+            if speed_mbps > 0:
+                text += f"\n▫️ Velocità: {format_speed(speed_mbps)}"
             if eta > 0:
                 text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
             asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
@@ -294,6 +301,7 @@ async def download_and_upload(
                         f"✅ Download completato ({format_size(file_size_mb)})\n"
                         f"📤 Upload in corso al canale...",
                     )
+                tracker.prev_ts = time_module.time()
                 await client.send_video(
                     chat_id=channel_id, video=filepath, caption=caption, supports_streaming=True,
                     progress=upload_progress,
@@ -359,25 +367,33 @@ async def _upload_existing(
     upload_success = False
     upload_error = None
     last_progress = 0.0
-    _up_prev = {"bytes": 0, "ts": 0.0}
+
+    class _UpTracker:
+        prev_bytes: int = 0
+        prev_ts: float = 0.0
+        last_update: float = 0.0
+
+    tracker = _UpTracker()
 
     def upload_progress(current: int, total: int) -> None:
-        nonlocal last_progress, _up_prev
+        nonlocal last_progress
         now = time_module.time()
         if now - last_progress < 2:
             return
         last_progress = now
         pct = (current / total * 100) if total > 0 else 0
-        delta_bytes = current - _up_prev["bytes"]
-        delta_t = now - _up_prev["ts"] if _up_prev["ts"] else 0
-        speed_mbps = (delta_bytes / delta_t / 1024 / 1024) if delta_t > 0 else 0
+        delta_bytes = current - tracker.prev_bytes
+        delta_t = now - tracker.prev_ts if tracker.prev_ts else 0
+        speed_mbps = (delta_bytes / delta_t / 1024 / 1024) if delta_t > 0 and delta_bytes > 0 else 0
         remaining = total - current
         eta = remaining / (delta_bytes / delta_t) if delta_bytes > 0 and delta_t > 0 else 0
-        _up_prev = {"bytes": current, "ts": now}
+        tracker.prev_bytes = current
+        tracker.prev_ts = now
         text = (
-            f"📤 Upload {format_size(current/(1024*1024))} / {format_size(total/(1024*1024))} · {pct:.0f}%\n"
-            f"▫️ Velocità: {format_speed(speed_mbps)}"
+            f"📤 Upload {format_size(current/(1024*1024))} / {format_size(total/(1024*1024))} · {pct:.0f}%"
         )
+        if speed_mbps > 0:
+            text += f"\n▫️ Velocità: {format_speed(speed_mbps)}"
         if eta > 0:
             text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
         asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
@@ -388,6 +404,7 @@ async def _upload_existing(
         try:
             if attempt > 1:
                 await _safe_edit(status_msg, f"📤 Upload (tentativo {attempt}/{max_retries})...")
+            tracker.prev_ts = time_module.time()
             await client.send_video(
                 chat_id=channel_id, video=filepath, caption=caption,
                 supports_streaming=True, progress=upload_progress,
