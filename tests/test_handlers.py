@@ -44,8 +44,6 @@ class TestUrlRegex:
 
 
 class TestEscapeMarkdown:
-    """Markdown injection protection for video titles (Pyrogram default = markdown)."""
-
     def test_plain_text_unchanged(self):
         assert _escape_md("Titolo normale") == "Titolo normale"
 
@@ -62,7 +60,6 @@ class TestEscapeMarkdown:
         assert _escape_md("[link]") == "\\[link\\]"
 
     def test_escape_backslash_first(self):
-        # backslash must be escaped first to avoid double-escaping
         assert _escape_md("a\\b*c") == "a\\\\b\\*c"
 
     def test_empty_string(self):
