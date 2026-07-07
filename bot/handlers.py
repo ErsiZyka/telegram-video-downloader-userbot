@@ -104,6 +104,8 @@ def _escape_md(text: str) -> str:
 # ─── Safe message helpers (Telethon API + FloodWait mute) ───
 
 async def _safe_edit(msg, text: str) -> None:
+    if msg is None:
+        return
     global _edit_muted_until
     now = time_module.time()
     if now < _edit_muted_until:
@@ -184,7 +186,7 @@ async def _send_playlist_menu(event, user_id: int, videos: list, url: str, page:
 # ─── Core: download_and_upload (FastTelethon parallel upload) ───
 
 async def download_and_upload(
-    client, event, url: str, quality: str, title: str, channel_id: int, max_retries: int = 3,
+    client, event, status_msg, url: str, quality: str, title: str, channel_id: int, max_retries: int = 3,
 ) -> None:
     global _is_downloading, _cancel_requested
 
@@ -218,7 +220,7 @@ async def download_and_upload(
             if eta and int(eta) > 0:
                 text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
             text += f"\n▫️ {pct:.0f}%"
-            asyncio.ensure_future(_safe_edit(event.message, text))
+            asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
 
         filepath = None
         download_error = None
@@ -226,11 +228,11 @@ async def download_and_upload(
         for attempt in range(1, max_retries + 1):
             if _cancel_requested:
                 cleanup_orphan_files()
-                await _safe_edit(event.message, "🛑 Download annullato.")
+                await _safe_edit(status_msg, "🛑 Download annullato.")
                 return
             try:
                 if attempt > 1:
-                    await _safe_edit(event.message, f"⏳ Download (tentativo {attempt}/{max_retries})...")
+                    await _safe_edit(status_msg, f"⏳ Download (tentativo {attempt}/{max_retries})...")
                 filepath = await loop.run_in_executor(
                     None, download_video, url, quality, download_progress, 1,
                 )
@@ -238,7 +240,7 @@ async def download_and_upload(
                 break
             except CancelDownload:
                 cleanup_orphan_files()
-                await _safe_edit(event.message, "🛑 Download annullato.")
+                await _safe_edit(status_msg, "🛑 Download annullato.")
                 return
             except DownloadError as e:
                 download_error = str(e)
@@ -248,12 +250,12 @@ async def download_and_upload(
             except Exception as e:
                 if _cancel_requested:
                     cleanup_orphan_files()
-                    await _safe_edit(event.message, "🛑 Download annullato.")
+                    await _safe_edit(status_msg, "🛑 Download annullato.")
                     return
                 download_error = repr(e)
                 _log(f"Errore download (tentativo {attempt}): {download_error}")
                 cleanup_orphan_files()
-                await _safe_edit(event.message, f"❌ Download fallito: {e}")
+                await _safe_edit(status_msg, f"❌ Download fallito: {e}")
                 try:
                     _get_history().set_error(url, str(e), title)
                 except Exception:
@@ -262,7 +264,7 @@ async def download_and_upload(
 
         if filepath is None:
             cleanup_orphan_files()
-            await _safe_edit(event.message,
+            await _safe_edit(status_msg,
                 f"❌ Download fallito dopo {max_retries} tentativi.\nErrore: {download_error}")
             try:
                 _get_history().set_error(url, download_error or "download fallito", title)
@@ -277,7 +279,7 @@ async def download_and_upload(
         if file_size_gb > 2:
             if os.path.exists(filepath):
                 os.remove(filepath)
-            await _safe_edit(event.message,
+            await _safe_edit(status_msg,
                 f"❌ File troppo grande ({file_size_gb:.1f} GB). Limite Telegram: 2GB")
             return
 
@@ -319,9 +321,9 @@ async def download_and_upload(
                 text += f"\n▫️ Velocità: {format_speed(speed_mbps)}"
             if eta > 0:
                 text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
-            await _safe_edit(event.message, text)
+            await _safe_edit(status_msg, text)
 
-        await _safe_edit(event.message,
+        await _safe_edit(status_msg,
             f"✅ Download completato ({format_size(file_size_mb)})\n📤 Upload in corso (parallelo)...")
 
         for attempt in range(1, max_retries + 1):
@@ -342,7 +344,7 @@ async def download_and_upload(
                         os.remove(filepath)
                     except Exception:
                         pass
-                await _safe_edit(event.message, "🛑 Upload annullato. File eliminato.")
+                await _safe_edit(status_msg, "🛑 Upload annullato. File eliminato.")
                 return
             except FloodWaitError as e:
                 _log(f"FloodWait upload: {e.seconds}s")
@@ -354,7 +356,7 @@ async def download_and_upload(
                             os.remove(filepath)
                         except Exception:
                             pass
-                    await _safe_edit(event.message, "🛑 Upload annullato. File eliminato.")
+                    await _safe_edit(status_msg, "🛑 Upload annullato. File eliminato.")
                     return
                 upload_error = repr(e)
                 _log(f"Upload tentativo {attempt} fallito: {upload_error}")
@@ -368,13 +370,13 @@ async def download_and_upload(
                 _log(f"Cleanup fallito: {e!r}")
 
         if upload_success:
-            await _safe_edit(event.message, "✅ Video inviato con successo al canale!")
+            await _safe_edit(status_msg, "✅ Video inviato con successo al canale!")
             try:
                 _get_history().set_success(url, filepath, title)
             except Exception as e:
                 _log(f"history save failed: {e!r}")
         else:
-            await _safe_edit(event.message,
+            await _safe_edit(status_msg,
                 f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}")
             try:
                 _get_history().set_error(url, upload_error or "upload fallito", title)
@@ -388,17 +390,17 @@ async def download_and_upload(
 # ─── Upload existing file (no re-download) ───
 
 async def _upload_existing(
-    client, event, filepath: str, title: str, channel_id: int, url: str = "", max_retries: int = 2,
+    client, event, status_msg, filepath: str, title: str, channel_id: int, url: str = "", max_retries: int = 2,
 ) -> None:
     if not os.path.exists(filepath):
-        await _safe_edit(event.message, "❌ File non più presente. Rimanda il link.")
+        await _safe_edit(status_msg, "❌ File non più presente. Rimanda il link.")
         return
 
     file_size_bytes = os.path.getsize(filepath)
     file_size_mb = file_size_bytes / (1024 * 1024)
     file_size_gb = file_size_mb / 1024
     if file_size_gb > 2:
-        await _safe_edit(event.message, f"❌ File troppo grande ({file_size_gb:.1f} GB).")
+        await _safe_edit(status_msg, f"❌ File troppo grande ({file_size_gb:.1f} GB).")
         return
 
     caption = _escape_md(title) if title else "Video"
@@ -432,9 +434,9 @@ async def _upload_existing(
             text += f"\n▫️ Velocità: {format_speed(speed_mbps)}"
         if eta > 0:
             text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
-        await _safe_edit(event.message, text)
+        await _safe_edit(status_msg, text)
 
-    await _safe_edit(event.message, f"📤 Upload in corso: **{_escape_md(title)}** ({format_size(file_size_mb)})...")
+    await _safe_edit(status_msg, f"📤 Upload in corso: **{_escape_md(title)}** ({format_size(file_size_mb)})...")
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -458,13 +460,13 @@ async def _upload_existing(
                 await asyncio.sleep(2 ** (attempt - 1))
 
     if upload_success:
-        await _safe_edit(event.message, "✅ Video inviato con successo al canale!")
+        await _safe_edit(status_msg, "✅ Video inviato con successo al canale!")
         try:
             _get_history().set_success(url, filepath, title)
         except Exception as e:
             _log(f"history save failed: {e!r}")
     else:
-        await _safe_edit(event.message,
+        await _safe_edit(status_msg,
             f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}")
         try:
             _get_history().set_error(url, upload_error or "upload fallito", title)
@@ -544,8 +546,7 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
                 url = pending.get("url", "")
                 _clear_pending(user_id)
                 status_msg = await _safe_reply(event, f"📤 Invio file esistente: **{_escape_md(title)}**...")
-                if status_msg:
-                    await _upload_existing(client, event, filepath, title, channel_id, url)
+                await _upload_existing(client, event, status_msg, filepath, title, channel_id, url)
             elif action == "retry_download":
                 url = pending["url"]
                 _clear_pending(user_id)
@@ -620,8 +621,8 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
         title = pending["title"]
         _clear_pending(user_id)
         _log(f"Qualità scelta da {user_id}: {quality}")
-        await _safe_reply(event, f"⏳ Avvio download in qualità **{label}**...")
-        await download_and_upload(client, event, url, quality, title, channel_id)
+        status_msg = await _safe_reply(event, f"⏳ Avvio download in qualità **{label}**...")
+        await download_and_upload(client, event, status_msg, url, quality, title, channel_id)
         return
 
 
