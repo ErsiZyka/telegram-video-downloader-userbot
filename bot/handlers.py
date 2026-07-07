@@ -1,11 +1,15 @@
-"""Message and callback handlers for the video downloader userbot."""
+"""Message handlers for the video downloader userbot (reply-based, no buttons).
+
+NOTE: Userbots (user accounts) cannot receive callback queries — inline buttons
+do NOT work. All interaction is done via replies to menu messages.
+"""
 
 import re
 import os
 import asyncio
 import time as time_module
 from pyrogram import Client, filters
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
 from bot.whitelist import Whitelist
@@ -25,26 +29,18 @@ URL_REGEX = r"(https?://[^\s]+)"
 # ─── Download concurrency control ───
 _is_downloading = False
 
-# ─── URL cache: maps short key -> full URL (Telegram callback_data <= 64 bytes) ───
-_url_cache: dict[str, str] = {}
-_url_cache_counter = 0
+# ─── Pending menus: maps menu message_id -> state ───
+# state = {"type": "quality", "url": ..., "title": ...}
+#       | {"type": "playlist", "videos": [...], "url": ..., "page": int}
+_pending_menus: dict[int, dict] = {}
 
-
-def cache_url(url: str) -> str:
-    """Store a URL and return a short key safe for callback_data (<=64 bytes)."""
-    for key, val in _url_cache.items():
-        if val == url:
-            return key
-    global _url_cache_counter
-    _url_cache_counter += 1
-    key = f"u{_url_cache_counter}"
-    _url_cache[key] = url
-    return key
-
-
-def get_cached_url(key: str) -> str | None:
-    """Resolve a cached URL key back to the full URL."""
-    return _url_cache.get(key)
+# ─── Quality selection map (number -> (label, quality_key)) ───
+QUALITY_CHOICES = {
+    "1": ("360p", "360"),
+    "2": ("720p", "720"),
+    "3": ("1080p", "1080"),
+    "4": ("MAX", "max"),
+}
 
 
 def extract_url(text: str) -> str | None:
@@ -53,84 +49,9 @@ def extract_url(text: str) -> str | None:
     return match.group(1) if match else None
 
 
-# ─── Callback data format ───
-# "action:param1|param2"
-# - quality:QUALITY|URL_KEY   (e.g. "quality:720|u3")
-# - playlist:URL_KEY|index    (e.g. "playlist:u5|0")
-# - page:PAGE_NUM             (e.g. "page:1")
-# - cancel
-
-def parse_callback_data(data: str) -> tuple[str, str | None, str | None]:
-    """Parse callback data into (action, param1, param2)."""
-    if data == "cancel":
-        return ("cancel", None, None)
-    if ":" not in data:
-        return (data, None, None)
-    action, rest = data.split(":", 1)
-    if "|" in rest:
-        param1, param2 = rest.split("|", 1)
-    else:
-        param1, param2 = rest, None
-    return (action, param1, param2)
-
-
-def build_quality_keyboard(url: str) -> InlineKeyboardMarkup:
-    """Build an inline keyboard with quality options for a given URL."""
-    key = cache_url(url)
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("360p", callback_data=f"quality:360|{key}"),
-            InlineKeyboardButton("720p", callback_data=f"quality:720|{key}"),
-        ],
-        [
-            InlineKeyboardButton("1080p", callback_data=f"quality:1080|{key}"),
-            InlineKeyboardButton("🔥 MAX", callback_data=f"quality:max|{key}"),
-        ],
-        [
-            InlineKeyboardButton("❌ Annulla", callback_data="cancel"),
-        ],
-    ])
-
-
-def build_playlist_keyboard(
-    videos: list[dict],
-    page: int = 0,
-    page_size: int = 10,
-) -> InlineKeyboardMarkup:
-    """Build an inline keyboard for a playlist with pagination."""
-    total_pages = (len(videos) + page_size - 1) // page_size or 1
-    start = page * page_size
-    page_videos = videos[start:start + page_size]
-
-    rows = []
-    for i, video in enumerate(page_videos):
-        title = (video.get("title") or "Sconosciuto")[:50]
-        duration = video.get("duration", 0)
-        if duration:
-            mins, secs = divmod(duration, 60)
-            title = f"{title} • {mins}:{secs:02d}"
-        video_url = video.get("webpage_url") or video.get("url", "")
-        key = cache_url(video_url)
-        idx = start + i
-        rows.append([
-            InlineKeyboardButton(title[:45], callback_data=f"playlist:{key}|{idx}")
-        ])
-
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("◀️ Precedenti", callback_data=f"page:{page - 1}"))
-    if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton("Avanti ▶️", callback_data=f"page:{page + 1}"))
-    if nav_buttons:
-        rows.append(nav_buttons)
-    rows.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
-    return InlineKeyboardMarkup(rows)
-
-
-# ─── Helpers for safe message editing (no "exception never retrieved") ───
+# ─── Helpers for safe message editing (user accounts CAN edit their own messages) ───
 
 async def _safe_edit(msg: Message, text: str) -> None:
-    """Edit a message, ignoring transient errors (message deleted, not modified)."""
     try:
         await msg.edit_text(text)
     except Exception:
@@ -138,11 +59,68 @@ async def _safe_edit(msg: Message, text: str) -> None:
 
 
 async def _safe_delete(msg: Message) -> None:
-    """Delete a message, ignoring errors if it no longer exists."""
     try:
         await msg.delete()
     except Exception:
         pass
+
+
+def _escape_md(text: str) -> str:
+    """Escape markdown special chars so dynamic content (titles) renders literally.
+
+    Video titles from yt-dlp often contain *, _, ` etc. which break Pyrogram's
+    default markdown parsing. Without escaping, sending the message raises
+    BadRequest and the message never reaches the user.
+    """
+    if not text:
+        return ""
+    for ch in ("\\", "*", "_", "`", "[", "]"):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
+# ─── Menu builders (send text menus, store state keyed by message id) ───
+
+async def send_quality_menu(message: Message, url: str, title: str) -> None:
+    """Send a quality-selection menu as a reply; user replies with the number."""
+    menu = await message.reply_text(
+        f"🎬 **{_escape_md(title)}**\n\n"
+        f"Scegli la qualità (RISPONDI a questo messaggio col numero):\n"
+        f"1️⃣ 360p\n"
+        f"2️⃣ 720p\n"
+        f"3️⃣ 1080p\n"
+        f"🔥 4️⃣ MAX\n\n"
+        f"Esempio: rispondi con `2` per 720p."
+    )
+    _pending_menus[menu.id] = {"type": "quality", "url": url, "title": title}
+
+
+async def send_playlist_menu(
+    message: Message, videos: list[dict], url: str, page: int = 0, page_size: int = 10,
+) -> None:
+    """Send a numbered playlist menu; user replies with the video number."""
+    total = len(videos)
+    total_pages = (total + page_size - 1) // page_size or 1
+    start = page * page_size
+    page_videos = videos[start:start + page_size]
+
+    lines = [f"📋 **Playlist trovata**: {total} video\n"]
+    lines.append(f"_RISPONDI col numero del video da scaricare_ (pagina {page + 1}/{total_pages}):\n")
+    for i, v in enumerate(page_videos):
+        idx = start + i + 1
+        vtitle = _escape_md((v.get("title") or "Sconosciuto")[:60])
+        dur = v.get("duration", 0)
+        dur_str = f" • {dur // 60}:{dur % 60:02d}" if dur else ""
+        lines.append(f"{idx}. {vtitle}{dur_str}")
+
+    lines.append("")
+    if total_pages > 1:
+        lines.append("Per cambiare pagina rispondi con `next` o `prev`.")
+
+    menu = await message.reply_text("\n".join(lines))
+    _pending_menus[menu.id] = {
+        "type": "playlist", "videos": videos, "url": url, "page": page,
+    }
 
 
 # ─── Core: download_and_upload ───
@@ -159,13 +137,11 @@ async def download_and_upload(
     """Full download → upload → cleanup flow with progress, retry, and error handling."""
     global _is_downloading
 
-    # ─── Concurrency gate: one download at a time ───
     if _is_downloading:
-        await _safe_edit(status_msg, "⏳ C'è già un download in corso. Riprova tra poco.")
+        await status_msg.reply_text("⏳ C'è già un download in corso. Riprova tra poco.")
         return
     _is_downloading = True
 
-    # Capture the running event loop so the (thread-based) progress hook can talk to it
     loop = asyncio.get_running_loop()
 
     try:
@@ -178,7 +154,6 @@ async def download_and_upload(
             if now - last_progress_update < progress_interval:
                 return
             last_progress_update = now
-
             pct = (downloaded_mb / total_mb * 100) if total_mb > 0 else 0
             text = f"⏳ **Download in corso...**\n▫️ {format_size(downloaded_mb)}"
             if total_mb > 0:
@@ -187,8 +162,6 @@ async def download_and_upload(
             if eta and int(eta) > 0:
                 text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
             text += f"\n▫️ {pct:.0f}%"
-
-            # Thread-safe: schedule the edit on the main event loop
             asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
 
         # ─── Download phase ───
@@ -236,7 +209,7 @@ async def download_and_upload(
             return
 
         # ─── Upload phase ───
-        caption = title if title else "Video scaricato"
+        caption = _escape_md(title) if title else "Video scaricato"
         upload_success = False
         upload_error = None
 
@@ -249,7 +222,7 @@ async def download_and_upload(
                         status_msg,
                         f"✅ Download completato ({format_size(file_size_mb)})\n📤 Upload in corso al canale...",
                     )
-                await client.send_video(chat_id=channel_id, video=filepath, caption=caption)
+                await client.send_video(chat_id=channel_id, video=filepath, caption=caption, supports_streaming=True)
                 upload_success = True
                 break
             except FloodWait as e:
@@ -275,7 +248,7 @@ async def download_and_upload(
         _is_downloading = False
 
 
-# ─── Message handler ───
+# ─── Message handler (NEW links + reply selections) ───
 
 async def on_message(
     client: Client,
@@ -283,11 +256,21 @@ async def on_message(
     whitelist: Whitelist,
     channel_id: int,
 ) -> None:
-    """Handle incoming private text messages from whitelisted users."""
+    """Handle incoming private text messages: replies to menus OR new links."""
     if not message.from_user or not whitelist.is_authorized(message.from_user.id):
         return
 
-    url = extract_url(message.text or "")
+    text = (message.text or "").strip()
+
+    # ─── Check if this is a reply to a pending menu ───
+    reply_to_id = message.reply_to_message_id
+    has_url = extract_url(text) is not None
+    if reply_to_id and reply_to_id in _pending_menus and not has_url:
+        await _handle_selection(client, message, text, channel_id)
+        return
+
+    # ─── Otherwise treat as a new link ───
+    url = extract_url(text)
     if not url:
         return
 
@@ -298,144 +281,105 @@ async def on_message(
         info = await loop.run_in_executor(None, extract_info, url)
 
         if isinstance(info, list):
-            # Playlist
             if not info:
                 await _safe_edit(status_msg, "❌ La playlist è vuota o non contiene video accessibili.")
                 return
-            keyboard = build_playlist_keyboard(info, page=0)
-            total = len(info)
             await _safe_delete(status_msg)
-            new_msg = await message.reply_text(
-                f"📋 **Playlist trovata**: {total} video\nScegli quali video scaricare:",
-                reply_markup=keyboard,
-            )
-            _playlist_cache[str(new_msg.id)] = {"videos": info, "url": url}
+            await send_playlist_menu(message, info, url, page=0)
         else:
-            # Single video
             title = info.get("title", "Sconosciuto")
-            duration = info.get("duration", 0)
-            uploader = info.get("uploader", "")
-            filesize = info.get("filesize_approx", 0)
-            mins, secs = divmod(duration, 60)
-            dur_str = f"{mins}:{secs:02d}" if duration else "N/D"
-
-            text = f"🎬 **{title}**\n"
-            if uploader:
-                text += f"📺 {uploader}\n"
-            text += f"⏱ {dur_str}"
-            if filesize:
-                text += f" • ~{filesize / (1024 * 1024):.0f} MB"
-            text += "\n\nScegli la qualità:"
-
-            keyboard = build_quality_keyboard(url)
-            # Cache the title keyed the same way the keyboard does, for the caption
-            url_key = cache_url(url)
-            _title_cache[url_key] = title
             await _safe_delete(status_msg)
-            await message.reply_text(text, reply_markup=keyboard)
-
+            await send_quality_menu(message, url, title)
     except ExtractError as e:
         await _safe_edit(status_msg, f"❌ {str(e)}")
     except Exception as e:
         await _safe_edit(status_msg, f"❌ Errore durante l'analisi: {str(e)}")
 
 
-# ─── Callback handler ───
-
-_playlist_cache: dict[str, dict] = {}
-_title_cache: dict[str, str] = {}
-
-
-async def on_callback(
-    client: Client,
-    callback: CallbackQuery,
-    whitelist: Whitelist,
-    channel_id: int,
-) -> None:
-    """Handle all inline button callbacks."""
-    if not whitelist.is_authorized(callback.from_user.id):
-        await callback.answer("Non sei autorizzato.", show_alert=True)
+async def _handle_selection(client: Client, message: Message, text: str, channel_id: int) -> None:
+    """Handle a reply to a pending menu (quality or playlist selection)."""
+    menu_id = message.reply_to_message_id
+    state = _pending_menus.get(menu_id)
+    if not state:
         return
 
-    data = callback.data or ""
-    action, param1, param2 = parse_callback_data(data)
+    text_lower = text.lower().strip()
 
-    try:
-        if action == "cancel":
-            if callback.message:
-                await _safe_delete(callback.message)
-            await callback.answer()
+    # ─── Playlist menu reply ───
+    if state["type"] == "playlist":
+        videos = state["videos"]
+        page = state["page"]
+
+        # Pagination
+        if text_lower in ("next", ">", "avanti", "su"):
+            page_size = 10
+            total_pages = (len(videos) + page_size - 1) // page_size or 1
+            new_page = min(page + 1, total_pages - 1)
+            _pending_menus.pop(menu_id, None)
+            await send_playlist_menu(message, videos, state["url"], page=new_page)
+            return
+        if text_lower in ("prev", "<", "indietro", "giù", "giu"):
+            new_page = max(state["page"] - 1, 0)
+            _pending_menus.pop(menu_id, None)
+            await send_playlist_menu(message, videos, state["url"], page=new_page)
             return
 
-        if action == "page":
-            page = int(param1)
-            cache_key = str(callback.message.id) if callback.message else ""
-            cached = _playlist_cache.get(cache_key)
-            if cached and callback.message:
-                keyboard = build_playlist_keyboard(cached["videos"], page=page)
-                total = len(cached["videos"])
-                await callback.message.edit_text(
-                    f"📋 **Playlist trovata**: {total} video\nScegli quali video scaricare:",
-                    reply_markup=keyboard,
-                )
-                await callback.answer()
-            else:
-                await callback.answer("Playlist non più disponibile. Rimanda il link.", show_alert=True)
-            return
-
-        if action == "quality":
-            quality = param2 or "720"
-            url_key = param1
-            url = get_cached_url(url_key) or ""
-            title = _title_cache.get(url_key, "")
-            if not url:
-                await callback.answer("Link scaduto. Rimanda il messaggio.", show_alert=True)
-                return
-            await callback.answer(f"Download {quality}...")
-            if callback.message:
-                await callback.message.edit_text(
-                    f"⏳ Avvio download in qualità **{quality}**...", reply_markup=None,
-                )
-                await download_and_upload(
-                    client, callback.message, url, quality, title, channel_id,
-                )
-            return
-
-        if action == "playlist":
-            url_key = param1
-            video_url = get_cached_url(url_key) or ""
-            if not video_url:
-                await callback.answer("Link scaduto. Rimanda il messaggio.", show_alert=True)
-                return
-            await callback.answer("Analisi del video...")
-            if not callback.message:
-                return
-            status_msg = await callback.message.reply_text("🔍 Analisi del video...")
-            try:
-                loop = asyncio.get_running_loop()
-                info = await loop.run_in_executor(None, extract_info, video_url)
-                if isinstance(info, list):
-                    info = info[0] if info else {}
-                title = info.get("title", "Sconosciuto")
-                keyboard = build_quality_keyboard(video_url)
-                _title_cache[cache_url(video_url)] = title
-                await _safe_delete(status_msg)
-                await callback.message.reply_text(
-                    f"🎬 **{title}**\nScegli la qualità:", reply_markup=keyboard,
-                )
-            except ExtractError as e:
-                await _safe_edit(status_msg, f"❌ {str(e)}")
-            except Exception as e:
-                await _safe_edit(status_msg, f"❌ Errore: {str(e)}")
-            return
-
-        await callback.answer("Azione sconosciuta.")
-    except Exception as e:
-        # Never let a callback error bubble up unhandled
+        # Video number
         try:
-            await callback.answer(f"❌ Errore: {str(e)[:100]}", show_alert=True)
-        except Exception:
-            pass
+            num = int(text)
+        except ValueError:
+            await message.reply_text("❌ Numero non valido. Rispondi col numero del video.")
+            return
+        if num < 1 or num > len(videos):
+            await message.reply_text(f"❌ Numero fuori range. Vanno da 1 a {len(videos)}.")
+            return
+
+        video = videos[num - 1]
+        video_url = video.get("webpage_url") or video.get("url", "")
+        if not video_url:
+            await message.reply_text("❌ URL del video non disponibile.")
+            return
+
+        # Resolve the single video, then show quality menu
+        status_msg = await message.reply_text("🔍 Analisi del video...")
+        try:
+            loop = asyncio.get_running_loop()
+            info = await loop.run_in_executor(None, extract_info, video_url)
+            if isinstance(info, list):
+                info = info[0] if info else {}
+            title = info.get("title", "Sconosciuto")
+            _pending_menus.pop(menu_id, None)
+            await _safe_delete(status_msg)
+            await send_quality_menu(message, video_url, title)
+        except ExtractError as e:
+            await _safe_edit(status_msg, f"❌ {str(e)}")
+        except Exception as e:
+            await _safe_edit(status_msg, f"❌ Errore: {str(e)}")
+        return
+
+    # ─── Quality menu reply ───
+    if state["type"] == "quality":
+        # Accept "1".."4" or direct "360"/"720"/"1080"/"max"
+        choice = QUALITY_CHOICES.get(text_lower)
+        if text_lower in ("360", "720", "1080", "max"):
+            label = "MAX" if text_lower == "max" else f"{text_lower}p"
+            quality = text_lower
+        elif choice:
+            label, quality = choice
+        else:
+            await message.reply_text(
+                "❌ Scelta non valida. Rispondi con `1`, `2`, `3` o `4` "
+                "(oppure `360`, `720`, `1080`, `max`)."
+            )
+            return
+
+        url = state["url"]
+        title = state["title"]
+        _pending_menus.pop(menu_id, None)
+
+        status_msg = await message.reply_text(f"⏳ Avvio download in qualità **{label}**...")
+        await download_and_upload(client, status_msg, url, quality, title, channel_id)
+        return
 
 
 # ─── Admin commands ───
@@ -545,7 +489,7 @@ async def cmd_status(client: Client, message: Message):
 # ─── Handler registration ───
 
 def register_handlers(app: Client, whitelist: Whitelist, channel_id: int, owner_id: int) -> None:
-    """Register all message and callback handlers on the Pyrogram client."""
+    """Register the message handler on the Pyrogram client."""
 
     @app.on_message(filters.text & filters.private)
     async def _on_message(client, message):
@@ -567,10 +511,3 @@ def register_handlers(app: Client, whitelist: Whitelist, channel_id: int, owner_
                 await cmd_status(client, message)
                 return
         await on_message(client, message, whitelist, channel_id)
-
-    @app.on_callback_query()
-    async def _on_callback(client, callback):
-        if not whitelist.is_authorized(callback.from_user.id):
-            await callback.answer("Non sei autorizzato.", show_alert=True)
-            return
-        await on_callback(client, callback, whitelist, channel_id)
