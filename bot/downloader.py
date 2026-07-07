@@ -133,6 +133,34 @@ def extract_info(url: str) -> dict | list[dict]:
 
 import subprocess
 import time
+import json
+
+
+def probe_video_metadata(filepath: str) -> tuple[int, int, int]:
+    """Extract real (duration_seconds, width, height) from a video file via ffprobe.
+
+    Returns (0, 0, 0) if ffprobe is unavailable or the file cannot be probed.
+    Telegram needs real values to show the file as a playable video (with
+    streaming + thumbnail) instead of a generic document.
+    """
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", filepath],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return (0, 0, 0)
+        data = json.loads(result.stdout)
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                duration = float(stream.get("duration", 0) or 0)
+                width = int(stream.get("width", 0) or 0)
+                height = int(stream.get("height", 0) or 0)
+                return (int(duration), width, height)
+    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
+        pass
+    return (0, 0, 0)
 
 
 def check_dependencies() -> tuple[bool, str]:

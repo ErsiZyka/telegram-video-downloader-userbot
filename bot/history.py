@@ -79,6 +79,31 @@ class DownloadHistory:
             del self._data[url]
             self._save(self._data)
 
+    # Error messages from bugs that have already been fixed in code.
+    # On startup we purge any residual history entries matching these patterns
+    # so the bot no longer prompts "riprova" for already-resolved failures.
+    _RESOLVED_ERROR_PATTERNS = (
+        "There is no current event loop in thread",
+        "DocumentAttributeVideo",
+    )
+
+    def purge_resolved_errors(self) -> int:
+        """Remove history error entries caused by bugs already fixed in code.
+
+        Returns the number of entries removed.
+        """
+        removed = 0
+        for url, entry in list(self._data.items()):
+            if entry.get("status") != "error":
+                continue
+            err = str(entry.get("error", ""))
+            if any(pat in err for pat in self._RESOLVED_ERROR_PATTERNS):
+                del self._data[url]
+                removed += 1
+        if removed:
+            self._save(self._data)
+        return removed
+
     def clear_orphan_entries(self, download_dir: str = "downloads") -> int:
         """Remove history entries whose file no longer exists. Returns count removed."""
         removed = 0
