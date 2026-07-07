@@ -31,6 +31,11 @@ URL_REGEX = r"(https?://[^\s]+)"
 
 # ─── Download concurrency control ───
 _is_downloading = False
+_cancel_requested = False  # set by /stop command
+
+
+class CancelDownload(Exception):
+    """Raised to interrupt an in-progress download/upload."""
 
 # ─── Per-user pending action state ───
 # user_id -> {"type": "quality"|"playlist", ..., "ts": timestamp}
@@ -174,6 +179,8 @@ async def download_and_upload(
         await status_msg.reply_text("⏳ C'è già un download in corso. Riprova tra poco.")
         return
     _is_downloading = True
+    global _cancel_requested
+    _cancel_requested = False  # reset for this download
     _log(f"Download iniziato: {url} [{quality}]")
 
     loop = asyncio.get_running_loop()
@@ -184,6 +191,8 @@ async def download_and_upload(
 
         def progress_callback(downloaded_mb: float, total_mb: float, speed_mbps: float, eta) -> None:
             nonlocal last_progress_update
+            if _cancel_requested:
+                raise CancelDownload("stop")
             now = time_module.time()
             if now - last_progress_update < progress_interval:
                 return
@@ -203,6 +212,10 @@ async def download_and_upload(
         download_error = None
 
         for attempt in range(1, max_retries + 1):
+            if _cancel_requested:
+                cleanup_orphan_files()
+                await _safe_edit(status_msg, "🛑 Download annullato.")
+                return
             try:
                 if attempt > 1:
                     await _safe_edit(status_msg, f"⏳ Download (tentativo {attempt}/{max_retries})...")
@@ -211,12 +224,20 @@ async def download_and_upload(
                 )
                 _log(f"Download completato: {filepath}")
                 break
+            except CancelDownload:
+                cleanup_orphan_files()
+                await _safe_edit(status_msg, "🛑 Download annullato.")
+                return
             except DownloadError as e:
                 download_error = str(e)
                 _log(f"Tentativo {attempt} fallito: {download_error}")
                 if attempt < max_retries:
                     await asyncio.sleep(2 ** (attempt - 1))
             except Exception as e:
+                if _cancel_requested:
+                    cleanup_orphan_files()
+                    await _safe_edit(status_msg, "🛑 Download annullato.")
+                    return
                 download_error = repr(e)
                 _log(f"Errore imprevisto download (tentativo {attempt}): {download_error}")
                 cleanup_orphan_files()
@@ -269,6 +290,8 @@ async def download_and_upload(
 
         def upload_progress(current: int, total: int) -> None:
             nonlocal last_upload_progress
+            if _cancel_requested:
+                raise CancelDownload("stop")
             now = time_module.time()
             if now - last_upload_progress < 2:
                 return
@@ -309,10 +332,26 @@ async def download_and_upload(
                 upload_success = True
                 _log("Upload completato con successo")
                 break
+            except CancelDownload:
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except Exception:
+                        pass
+                await _safe_edit(status_msg, "🛑 Upload annullato. File eliminato.")
+                return
             except FloodWait as e:
                 _log(f"FloodWait upload: attendo {e.value}s")
                 await asyncio.sleep(e.value)
             except Exception as e:
+                if _cancel_requested:
+                    if os.path.exists(filepath):
+                        try:
+                            os.remove(filepath)
+                        except Exception:
+                            pass
+                    await _safe_edit(status_msg, "🛑 Upload annullato. File eliminato.")
+                    return
                 upload_error = repr(e)
                 _log(f"Upload tentativo {attempt} fallito: {upload_error}")
                 if attempt < max_retries:
@@ -729,6 +768,23 @@ async def cmd_status(client: Client, message: Message):
     await message.reply_text(f"📊 Download in corso: {'sì' if _is_downloading else 'no'}")
 
 
+async def cmd_stop(client: Client, message: Message, owner_id: int) -> None:
+    """Stop any in-progress download/upload and clean up files."""
+    if not message.from_user or message.from_user.id != owner_id:
+        return
+    global _cancel_requested
+    if _is_downloading:
+        _cancel_requested = True
+        await message.reply_text("🛑 Interruzione richiesta... il processo verrà fermato al prossimo ciclo.")
+        _log("Stop richiesto dall'utente")
+    else:
+        # Nothing in progress: just clean any leftover files
+        removed = cleanup_orphan_files()
+        await message.reply_text(
+            f"📭 Nessun download in corso. Puliti {len(removed)} file residui."
+        )
+
+
 # ─── Handler registration ───
 
 def register_handlers(app: Client, whitelist: Whitelist, channel_id: int, owner_id: int) -> None:
@@ -750,5 +806,8 @@ def register_handlers(app: Client, whitelist: Whitelist, channel_id: int, owner_
                 return
             elif text.startswith("/status"):
                 await cmd_status(client, message)
+                return
+            elif text.startswith("/stop"):
+                await cmd_stop(client, message, owner_id)
                 return
         await on_message(client, message, whitelist, channel_id, owner_id)
