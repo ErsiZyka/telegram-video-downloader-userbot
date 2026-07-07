@@ -48,6 +48,19 @@ def format_eta(seconds: int | None | float) -> str:
 
 
 import yt_dlp
+import os
+
+
+def _get_ydl_cookie_opts() -> dict:
+    """Build cookie-related yt-dlp options from COOKIES_FROM_BROWSER env var.
+
+    Set COOKIES_FROM_BROWSER in .env to one of: chrome, edge, firefox, brave,
+    chromium, opera, safari, vivaldi, whale.
+    """
+    browser = os.getenv("COOKIES_FROM_BROWSER", "").strip().lower()
+    if not browser:
+        return {}
+    return {"cookiesfrombrowser": (browser,)}
 
 
 def extract_info(url: str) -> dict | list[dict]:
@@ -69,6 +82,7 @@ def extract_info(url: str) -> dict | list[dict]:
         "extract_flat": "in_playlist",
         "skip_download": True,
     }
+    ydl_opts.update(_get_ydl_cookie_opts())
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -212,6 +226,7 @@ def download_video(
         "socket_timeout": 30,
         "retries": 5,
     }
+    ydl_opts.update(_get_ydl_cookie_opts())
 
     last_error = None
 

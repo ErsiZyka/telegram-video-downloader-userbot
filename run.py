@@ -105,13 +105,25 @@ async def main() -> None:
     print(f"   Download dir: {download_dir}")
 
     # ─── Pre-resolve the target channel (warm up the session peer cache) ───
-    # This prevents "Peer id invalid" errors when sending to the channel.
+    # A fresh session has an empty peer cache. Fetching dialogs forces Pyrogram
+    # to cache all chats/channels the account is a member of, including the
+    # target channel. This prevents "Peer id invalid" errors.
     try:
-        await app.get_chat(config["channel_id"])
-        print("Canale destinazione risolto correttamente.")
+        print("Preparazione cache peer...")
+        async for _ in app.get_dialogs():
+            pass
+        print("Cache peer popolata.")
+    except Exception as e:
+        print(f"ATTENZIONE: impossibile leggere i dialoghi ({e}).")
+
+    try:
+        chat = await app.get_chat(config["channel_id"])
+        name = chat.title if chat else config["channel_id"]
+        print(f"Canale destinazione risolto: {name}")
     except Exception as e:
         print(f"ATTENZIONE: impossibile pre-risolvere il canale ({e}).")
         print("Assicurati che l'userbot sia admin del canale e che il CHANNEL_ID sia corretto.")
+        print("Se il canale e' pubblico, usa CHANNEL_USERNAME=@nomecanale nel .env.")
 
     # ─── Run until stopped ───
     await idle()
