@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 from bot.client import create_client
 from bot.whitelist import Whitelist
-from bot.downloader import check_dependencies, cleanup_orphan_files
+from bot.downloader import check_dependencies
 from bot.history import DownloadHistory
 
 
@@ -68,11 +68,10 @@ async def main() -> None:
         sys.exit(1)
     print("Dipendenze OK")
 
-    removed = cleanup_orphan_files(download_dir)
-    if removed:
-        print(f"Puliti {len(removed)} file orfani")
-
     history = DownloadHistory(filepath="data/download_history.json")
+    removed_resolved = history.purge_resolved_errors()
+    if removed_resolved:
+        print(f"Pulite {removed_resolved} entry di errore già risolte dalla cronologia")
     removed_h = history.clear_orphan_entries(download_dir)
     if removed_h:
         print(f"Pulite {removed_h} entry orfane dalla cronologia")
@@ -102,6 +101,10 @@ async def main() -> None:
         print(f"Canale risolto: {name}")
     except Exception as e:
         print(f"ATTENZIONE: canale non risolto ({e})")
+
+    # Start the download queue worker (handles resume prompt if queue non-empty)
+    from bot.handlers import start_queue_worker
+    await start_queue_worker(client, config["channel_id"], config["owner_id"])
 
     await client.run_until_disconnected()
     print("Userbot fermato.")
