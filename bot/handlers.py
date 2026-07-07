@@ -255,9 +255,13 @@ async def on_message(
     message: Message,
     whitelist: Whitelist,
     channel_id: int,
+    owner_id: int,
 ) -> None:
     """Handle incoming private text messages: replies to menus OR new links."""
-    if not message.from_user or not whitelist.is_authorized(message.from_user.id):
+    if not message.from_user:
+        return
+    # Owner can always download, others must be whitelisted
+    if message.from_user.id != owner_id and not whitelist.is_authorized(message.from_user.id):
         return
 
     text = (message.text or "").strip()
@@ -510,4 +514,4 @@ def register_handlers(app: Client, whitelist: Whitelist, channel_id: int, owner_
             elif text.startswith("/status"):
                 await cmd_status(client, message)
                 return
-        await on_message(client, message, whitelist, channel_id)
+        await on_message(client, message, whitelist, channel_id, owner_id)

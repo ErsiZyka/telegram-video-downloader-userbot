@@ -131,7 +131,6 @@ def extract_info(url: str) -> dict | list[dict]:
         raise ExtractError(f"Errore durante l'estrazione: {str(e)}")
 
 
-import os
 import subprocess
 import time
 
