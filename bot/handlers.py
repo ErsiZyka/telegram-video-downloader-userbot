@@ -235,9 +235,26 @@ async def download_and_upload(
             return
 
         # ─── Upload phase ───
+        from bot.downloader import format_size as fmt_sz
         caption = _escape_md(title) if title else "Video scaricato"
         upload_success = False
         upload_error = None
+        last_upload_progress = 0.0
+
+        def upload_progress(current: int, total: int) -> None:
+            """Called by Pyrogram during upload; update status message."""
+            nonlocal last_upload_progress
+            now = time_module.time()
+            if now - last_upload_progress < 2:
+                return
+            last_upload_progress = now
+            pct = (current / total * 100) if total > 0 else 0
+            asyncio.run_coroutine_threadsafe(
+                _safe_edit(status_msg,
+                    f"✅ Download completato ({format_size(file_size_mb)})\n"
+                    f"📤 Upload {fmt_sz(current/(1024*1024))} / {fmt_sz(total/(1024*1024))} · {pct:.0f}%"),
+                loop,
+            )
 
         for attempt in range(1, max_retries + 1):
             try:
@@ -251,6 +268,7 @@ async def download_and_upload(
                     )
                 await client.send_video(
                     chat_id=channel_id, video=filepath, caption=caption, supports_streaming=True,
+                    progress=upload_progress,
                 )
                 upload_success = True
                 _log("Upload completato con successo")

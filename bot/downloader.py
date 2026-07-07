@@ -273,6 +273,9 @@ def cleanup_orphan_files(download_dir: str = "downloads") -> list[str]:
         for f in os.listdir(download_dir):
             path = os.path.join(download_dir, f)
             if os.path.isfile(path) and f != ".gitkeep":
-                os.remove(path)
-                removed.append(path)
+                try:
+                    os.remove(path)
+                    removed.append(path)
+                except (PermissionError, OSError):
+                    pass  # file locked by another process, skip
     return removed
