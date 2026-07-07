@@ -41,12 +41,20 @@ def make_whitelist(user_id=111222333):
 @pytest.fixture(autouse=True)
 def reset_state():
     h._pending.clear()
-    h._is_downloading = False
     h._cancel_requested = False
     h._edit_muted_until = 0.0
+    for attr in ("_current_item",):
+        if hasattr(h, attr):
+            setattr(h, attr, None)
+    if hasattr(h, "_queue") and h._queue is not None:
+        h._queue.clear()
     yield
     h._pending.clear()
-    h._is_downloading = False
+    for attr in ("_current_item",):
+        if hasattr(h, attr):
+            setattr(h, attr, None)
+    if hasattr(h, "_queue") and h._queue is not None:
+        h._queue.clear()
 
 
 def test_history_filepath_not_corrupted():

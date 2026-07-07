@@ -9,6 +9,7 @@ import re
 import os
 import asyncio
 import time as time_module
+from urllib.parse import urlparse
 from telethon import events
 from telethon.errors import FloodWaitError
 from telethon.tl.types import DocumentAttributeVideo
@@ -17,6 +18,7 @@ from bot.whitelist import Whitelist
 from bot.downloader import (
     extract_info,
     download_video,
+    probe_video_metadata,
     DownloadError,
     ExtractError,
     format_size,
@@ -30,7 +32,6 @@ from bot.fasttelethon import upload_file
 URL_REGEX = r"(https?://[^\s]+)"
 
 # ─── State ───
-_is_downloading = False
 _cancel_requested = False
 _edit_muted_until = 0.0
 
@@ -99,6 +100,25 @@ def _escape_md(text: str) -> str:
     for ch in ("\\", "*", "_", "`", "[", "]"):
         text = text.replace(ch, f"\\{ch}")
     return text
+
+
+def _build_caption(title: str, url: str = "") -> str:
+    """Build the video caption: title + clickable link to the original video and site.
+
+    Markdown inline links are used so they render as t.me-style clickable links.
+    """
+    caption = _escape_md(title) if title else "Video scaricato"
+    if url:
+        clean_url = url.strip()
+        # Telegram inline link: [text](url). Escape ']' and ')' inside the URL
+        # is not needed for the URL part itself, but avoid whitespace breaking it.
+        caption += f"\n\n🔗 [Video originale]({clean_url})"
+        site = urlparse(clean_url).netloc
+        if site.startswith("www."):
+            site = site[4:]
+        if site:
+            caption += f"\n🌐 Sito: {_escape_md(site)}"
+    return caption
 
 
 # ─── Safe message helpers (Telethon API + FloodWait mute) ───
@@ -186,14 +206,15 @@ async def _send_playlist_menu(event, user_id: int, videos: list, url: str, page:
 # ─── Core: download_and_upload (FastTelethon parallel upload) ───
 
 async def download_and_upload(
-    client, event, status_msg, url: str, quality: str, title: str, channel_id: int, max_retries: int = 3,
-) -> None:
-    global _is_downloading, _cancel_requested
+    client, status_msg, url: str, quality: str, title: str,
+    channel_id: int, owner_id: int, max_retries: int = 3,
+) -> str:
+    """Download then upload a video. Returns outcome: 'ok' | 'error' | 'cancelled'.
 
-    if _is_downloading:
-        await _safe_reply(event, "⏳ C'è già un download in corso.")
-        return
-    _is_downloading = True
+    The caller (the queue worker) is responsible for serialization. Status
+    updates are sent by editing `status_msg`; final errors go to `owner_id`.
+    """
+    global _cancel_requested
     _cancel_requested = False
     _log(f"Download iniziato: {url} [{quality}]")
 
@@ -229,7 +250,7 @@ async def download_and_upload(
             if _cancel_requested:
                 cleanup_orphan_files()
                 await _safe_edit(status_msg, "🛑 Download annullato.")
-                return
+                return "cancelled"
             try:
                 if attempt > 1:
                     await _safe_edit(status_msg, f"⏳ Download (tentativo {attempt}/{max_retries})...")
@@ -241,7 +262,7 @@ async def download_and_upload(
             except CancelDownload:
                 cleanup_orphan_files()
                 await _safe_edit(status_msg, "🛑 Download annullato.")
-                return
+                return "cancelled"
             except DownloadError as e:
                 download_error = str(e)
                 _log(f"Tentativo {attempt} fallito: {download_error}")
@@ -251,7 +272,7 @@ async def download_and_upload(
                 if _cancel_requested:
                     cleanup_orphan_files()
                     await _safe_edit(status_msg, "🛑 Download annullato.")
-                    return
+                    return "cancelled"
                 download_error = repr(e)
                 _log(f"Errore download (tentativo {attempt}): {download_error}")
                 cleanup_orphan_files()
@@ -260,7 +281,7 @@ async def download_and_upload(
                     _get_history().set_error(url, str(e), title)
                 except Exception:
                     pass
-                return
+                return "error"
 
         if filepath is None:
             cleanup_orphan_files()
@@ -270,7 +291,7 @@ async def download_and_upload(
                 _get_history().set_error(url, download_error or "download fallito", title)
             except Exception:
                 pass
-            return
+            return "error"
 
         file_size_bytes = os.path.getsize(filepath) if os.path.exists(filepath) else 0
         file_size_mb = file_size_bytes / (1024 * 1024)
@@ -281,10 +302,10 @@ async def download_and_upload(
                 os.remove(filepath)
             await _safe_edit(status_msg,
                 f"❌ File troppo grande ({file_size_gb:.1f} GB). Limite Telegram: 2GB")
-            return
+            return "error"
 
         # ─── Upload phase: FastTelethon parallel upload ───
-        caption = _escape_md(title) if title else "Video scaricato"
+        caption = _build_caption(title, url)
         upload_success = False
         upload_error = None
         last_upload_progress = 0.0
@@ -326,6 +347,12 @@ async def download_and_upload(
         await _safe_edit(status_msg,
             f"✅ Download completato ({format_size(file_size_mb)})\n📤 Upload in corso (parallelo)...")
 
+        # Probe real video metadata so Telegram shows it as a playable MP4
+        # (with streaming + thumbnail) instead of a generic document.
+        v_duration, v_w, v_h = await loop.run_in_executor(
+            None, probe_video_metadata, filepath
+        )
+
         for attempt in range(1, max_retries + 1):
             try:
                 tracker.prev_ts = time_module.time()
@@ -333,7 +360,9 @@ async def download_and_upload(
                     uploaded = await upload_file(client, f, progress_callback=upload_progress)
                 await client.send_file(
                     channel_id, file=uploaded, caption=caption,
-                    attributes=[DocumentAttributeVideo(duration=0, w=0, h=0, supports_streaming=True)],
+                    attributes=[DocumentAttributeVideo(
+                        duration=v_duration, w=v_w, h=v_h, supports_streaming=True
+                    )],
                 )
                 upload_success = True
                 _log("Upload completato con successo")
@@ -345,7 +374,7 @@ async def download_and_upload(
                     except Exception:
                         pass
                 await _safe_edit(status_msg, "🛑 Upload annullato. File eliminato.")
-                return
+                return "cancelled"
             except FloodWaitError as e:
                 _log(f"FloodWait upload: {e.seconds}s")
                 await asyncio.sleep(e.seconds)
@@ -357,7 +386,7 @@ async def download_and_upload(
                         except Exception:
                             pass
                     await _safe_edit(status_msg, "🛑 Upload annullato. File eliminato.")
-                    return
+                    return "cancelled"
                 upload_error = repr(e)
                 _log(f"Upload tentativo {attempt} fallito: {upload_error}")
                 if attempt < max_retries:
@@ -375,6 +404,7 @@ async def download_and_upload(
                 _get_history().set_success(url, filepath, title)
             except Exception as e:
                 _log(f"history save failed: {e!r}")
+            return "ok"
         else:
             await _safe_edit(status_msg,
                 f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}")
@@ -382,9 +412,10 @@ async def download_and_upload(
                 _get_history().set_error(url, upload_error or "upload fallito", title)
             except Exception:
                 pass
+            return "error"
 
     finally:
-        _is_downloading = False
+        pass
 
 
 # ─── Upload existing file (no re-download) ───
@@ -403,7 +434,7 @@ async def _upload_existing(
         await _safe_edit(status_msg, f"❌ File troppo grande ({file_size_gb:.1f} GB).")
         return
 
-    caption = _escape_md(title) if title else "Video"
+    caption = _build_caption(title, url)
     upload_success = False
     upload_error = None
     last_progress = 0.0
@@ -438,6 +469,11 @@ async def _upload_existing(
 
     await _safe_edit(status_msg, f"📤 Upload in corso: **{_escape_md(title)}** ({format_size(file_size_mb)})...")
 
+    # Probe real video metadata so Telegram shows it as a playable MP4
+    # (with streaming + thumbnail) instead of a generic document.
+    loop = asyncio.get_running_loop()
+    v_duration, v_w, v_h = await loop.run_in_executor(None, probe_video_metadata, filepath)
+
     for attempt in range(1, max_retries + 1):
         try:
             tracker.prev_ts = time_module.time()
@@ -445,7 +481,9 @@ async def _upload_existing(
                 uploaded = await upload_file(client, f, progress_callback=upload_progress)
             await client.send_file(
                 channel_id, file=uploaded, caption=caption,
-                attributes=[DocumentAttributeVideo(duration=0, w=0, h=0, supports_streaming=True)],
+                attributes=[DocumentAttributeVideo(
+                    duration=v_duration, w=v_w, h=v_h, supports_streaming=True
+                )],
             )
             upload_success = True
             _log("Upload esistente completato")
@@ -622,7 +660,7 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
         _clear_pending(user_id)
         _log(f"Qualità scelta da {user_id}: {quality}")
         status_msg = await _safe_reply(event, f"⏳ Avvio download in qualità **{label}**...")
-        await download_and_upload(client, event, status_msg, url, quality, title, channel_id)
+        await download_and_upload(client, status_msg, url, quality, title, channel_id, event.sender_id)
         return
 
 
