@@ -130,6 +130,9 @@ Doppio click su **`start_with_log.bat`** → apre **due** finestre:
 python run.py
 ```
 
+### Su Android (Termux — telefono come VPS gratis)
+Vedi la sezione **[Avvio su Android (Termux)](#avvio-su-android-termux--telefono-come-vps)** più sotto.
+
 La prima volta Telethon ti chiederà:
 1. Numero di telefono (es: `+393331234567`)
 2. Codice di verifica che arriva su Telegram
@@ -185,6 +188,66 @@ python -m pytest tests/ -v
 # 87 test passano
 ```
 
+## Avvio su Android (Termux — telefono come VPS gratis)
+
+Un vecchio telefono Android può fare da "VPS" gratis per tenere il bot attivo 24/7. **Non serve un'app APK**: si usa **Termux**, un'app gratuita che trasforma il telefono in un terminale Linux.
+
+### Cosa funziona sul telefono
+| Sì | No (richiede Chromium desktop) |
+|---|---|
+| YouTube, TikTok, Instagram, Twitter/X, YouPorn, Vimeo (tutti i siti yt-dlp) | Estrattori streaming italiani (altadefinizione, streamingcommunity) |
+| Coda, cronologia, upload al canale, comandi admin | — |
+| Logging su file | — |
+
+Il bot rileva automaticamente se Playwright non è disponibile e usa solo yt-dlp (nessun crash). Per i siti streaming italiani serve comunque un PC/server con Chromium.
+
+### Setup (sul telefono)
+1. **Installa Termux da F-Droid** (NON dal Play Store, è obsoleto):
+   https://f-droid.org/packages/com.termux/
+2. Apri Termux e dai:
+   ```bash
+   pkg update -y && pkg install -y git
+   git clone https://github.com/ErsiZyka/telegram-video-downloader-userbot.git
+   cd telegram-video-downloader-userbot
+   bash setup_termux.sh
+   ```
+   Lo script installa Python, ffmpeg, git, openssh, le dipendenze del bot e crea `.env`.
+3. **Configura `.env`** (API_ID, API_HASH, CHANNEL_ID, OWNER_ID):
+   ```bash
+   nano .env   # o: pkg install nano
+   ```
+4. **Sessione Telegram** — due opzioni:
+   - **A**: copia `my_video_downloader_bot.session` dal PC (invialo al telefono via Telegram e salvalo nella cartella del bot)
+   - **B**: al primo avvio fai il login dal telefono (chiede numero + codice)
+5. **Avvia**:
+   ```bash
+   bash start_termux.sh
+   ```
+
+### Mantenere il telefono sveglio (anti-sleep)
+`start_termux.sh` lancia `termux-wake-lock` automaticamente → Android non addormenta il processo. Stop con Ctrl+C rilascia il lock. Senza di questo Android ucciderebbe il bot in pochi minuti.
+
+### Auto-avvio al riavvio del telefono
+1. Installa **Termux:Boot** da F-Droid: https://f-droid.org/packages/com.termux.boot/
+2. Apri l'app Termux:Boot **una volta** (per inizializzarla)
+3. Poi in Termux:
+   ```bash
+   mkdir -p ~/.termux/boot
+   cp start_termux.sh ~/.termux/boot/run-bot.sh
+   ```
+Al prossimo riavvio del telefono, il bot parte da solo.
+
+### Gestione da PC via SSH (opzionale)
+Per controllare il bot dal PC senza toccare il telefono:
+```bash
+# Sul telefono:
+passwd          # imposta una password
+sshd            # avvia SSH sulla porta 8022
+ip addr         # trova l'IP del telefono
+# Dal PC:
+ssh -p 8022 <ip-telefono>
+```
+
 ## Struttura del progetto
 
 ```
@@ -196,6 +259,8 @@ telegram-video-downloader-userbot/
 ├── start.bat               # Avvio bot (Windows)
 ├── start_with_log.bat      # Avvio bot + finestra log live (Windows)
 ├── log.bat                 # Finestra log live (Windows)
+├── setup_termux.sh         # Setup su Android (Termux)
+├── start_termux.sh         # Avvio bot su Android con wake-lock
 ├── bot/
 │   ├── __init__.py
 │   ├── client.py           # Telethon Client setup
