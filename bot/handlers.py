@@ -32,10 +32,15 @@ URL_REGEX = r"(https?://[^\s]+)"
 # ─── Download concurrency control ───
 _is_downloading = False
 _cancel_requested = False  # set by /stop command
+_edit_muted_until = 0.0  # timestamp until which message edits are suppressed (FloodWait)
 
 
 class CancelDownload(Exception):
     """Raised to interrupt an in-progress download/upload."""
+
+
+class SlowUploadError(Exception):
+    """Raised when upload speed drops below threshold — triggers a fresh-connection retry."""
 
 # ─── Per-user pending action state ───
 # user_id -> {"type": "quality"|"playlist", ..., "ts": timestamp}
@@ -106,10 +111,35 @@ def _escape_md(text: str) -> str:
 # ─── Safe message helpers (log instead of silently swallowing) ───
 
 async def _safe_edit(msg: Message, text: str) -> None:
+    global _edit_muted_until
+    now = time_module.time()
+    if now < _edit_muted_until:
+        return  # still muted by a previous FloodWait
     try:
         await msg.edit_text(text)
+    except FloodWait as e:
+        _edit_muted_until = now + e.value
+        _log(f"Edit FloodWait: muto i messaggi per {e.value}s")
     except Exception as e:
         _log(f"edit_text fallito (ignorato): {e!r}")
+
+
+async def _safe_reply(message: Message, text: str) -> Message | None:
+    """Reply with text, handling FloodWait gracefully. Returns the sent message or None."""
+    global _edit_muted_until
+    now = time_module.time()
+    if now < _edit_muted_until:
+        _log(f"Reply saltato (muto per {_edit_muted_until - now:.0f}s ancora)")
+        return None
+    try:
+        return await message.reply_text(text)
+    except FloodWait as e:
+        _edit_muted_until = now + e.value
+        _log(f"Reply FloodWait: muto per {e.value}s")
+        return None
+    except Exception as e:
+        _log(f"reply_text fallito: {e!r}")
+        return None
 
 
 async def _safe_delete(msg: Message) -> None:
@@ -122,7 +152,8 @@ async def _safe_delete(msg: Message) -> None:
 # ─── Menu senders ───
 
 async def _send_quality_menu(message: Message, user_id: int, url: str, title: str) -> None:
-    menu = await message.reply_text(
+    menu = await _safe_reply(
+        message,
         f"🎬 **{_escape_md(title)}**\n\n"
         f"Scrivi qui il NUMERO della qualità:\n"
         f"1️⃣ 360p\n"
@@ -130,6 +161,9 @@ async def _send_quality_menu(message: Message, user_id: int, url: str, title: st
         f"3️⃣ 1080p\n"
         f"🔥 4️⃣ MAX"
     )
+    if menu is None:
+        _log("Menu qualità non inviato (FloodWait?) — riprova tra poco")
+        return
     _set_pending(user_id, {"type": "quality", "url": url, "title": title})
     _log(f"Menu qualità inviato a {user_id} (msg {menu.id})")
 
@@ -154,7 +188,10 @@ async def _send_playlist_menu(
     if total_pages > 1:
         lines.append("\nScrivi `next` o `prev` per cambiare pagina.")
 
-    menu = await message.reply_text("\n".join(lines))
+    menu = await _safe_reply(message, "\n".join(lines))
+    if menu is None:
+        _log("Menu playlist non inviato (FloodWait?)")
+        return
     _set_pending(user_id, {
         "type": "playlist", "videos": videos, "url": url, "page": page,
     })
@@ -187,7 +224,7 @@ async def download_and_upload(
 
     try:
         last_progress_update = 0.0
-        progress_interval = 2
+        progress_interval = 3
 
         def progress_callback(downloaded_mb: float, total_mb: float, speed_mbps: float, eta) -> None:
             nonlocal last_progress_update
@@ -196,6 +233,8 @@ async def download_and_upload(
             now = time_module.time()
             if now - last_progress_update < progress_interval:
                 return
+            if now < _edit_muted_until:
+                return  # skip edit while muted by FloodWait
             last_progress_update = now
             pct = (downloaded_mb / total_mb * 100) if total_mb > 0 else 0
             text = f"⏳ **Download in corso...**\n▫️ {format_size(downloaded_mb)}"
@@ -293,8 +332,10 @@ async def download_and_upload(
             if _cancel_requested:
                 raise CancelDownload("stop")
             now = time_module.time()
-            if now - last_upload_progress < 2:
+            if now - last_upload_progress < 5:
                 return
+            if now < _edit_muted_until:
+                return  # skip edit while muted by FloodWait
             last_upload_progress = now
             pct = (current / total * 100) if total > 0 else 0
             delta_bytes = current - tracker.prev_bytes
@@ -304,6 +345,9 @@ async def download_and_upload(
             eta = remaining / (delta_bytes / delta_t) if delta_bytes > 0 and delta_t > 0 else 0
             tracker.prev_bytes = current
             tracker.prev_ts = now
+            # Slow-upload detection: after 10MB uploaded, if speed < 0.4 MB/s, retry with fresh connection
+            if current > 10 * 1024 * 1024 and speed_mbps > 0 and speed_mbps < 0.4:
+                raise SlowUploadError(f"velocità troppo bassa ({speed_mbps:.2f} MB/s)")
             text = (
                 f"✅ Download completato ({format_size(file_size_mb)})\n"
                 f"📤 Upload {fmt_sz(current/(1024*1024))} / {fmt_sz(total/(1024*1024))} · {pct:.0f}%"
@@ -340,6 +384,20 @@ async def download_and_upload(
                         pass
                 await _safe_edit(status_msg, "🛑 Upload annullato. File eliminato.")
                 return
+            except SlowUploadError as e:
+                _log(f"Upload lento, ritento con connessione fresca: {e}")
+                upload_error = str(e)
+                if attempt < max_retries:
+                    await _safe_edit(status_msg, f"🔄 Upload lento ({e}), ritento ({attempt + 1}/{max_retries})...")
+                    await asyncio.sleep(2)
+                else:
+                    if os.path.exists(filepath):
+                        try:
+                            os.remove(filepath)
+                        except Exception:
+                            pass
+                    await _safe_edit(status_msg, f"❌ Upload troppo lento dopo {max_retries} tentativi.")
+                    return
             except FloodWait as e:
                 _log(f"FloodWait upload: attendo {e.value}s")
                 await asyncio.sleep(e.value)
@@ -495,7 +553,7 @@ async def _process_link(client: Client, message: Message, url: str, channel_id: 
             filepath = entry.get("filepath", "")
             if os.path.exists(filepath):
                 # File still on disk → offer re-upload without re-downloading
-                await message.reply_text(
+                await _safe_reply(message, 
                     f"📂 **{_escape_md(title)}** giá scaricato (uploadato il {date_str}).\n"
                     f"Scrivi `si` per ricaricarlo subito (senza riscaricare), o `no` per annullare."
                 )
@@ -509,7 +567,7 @@ async def _process_link(client: Client, message: Message, url: str, channel_id: 
                 return
             else:
                 # File cleaned up → warn and offer re-download
-                await message.reply_text(
+                await _safe_reply(message, 
                     f"📂 **{_escape_md(title)}** é giá stato uploadato il {date_str} (file rimosso dal disco).\n"
                     f"Scrivi `si` per riscaricarlo e ricaricarlo, o `no` per annullare."
                 )
@@ -522,7 +580,7 @@ async def _process_link(client: Client, message: Message, url: str, channel_id: 
                 return
         elif status == "error":
             err = entry.get("error", "errore sconosciuto")
-            await message.reply_text(
+            await _safe_reply(message, 
                 f"⚠️ Questo link ha dato errore in precedenza: _{err}_\n"
                 f"Scrivi `si` per riprovare o `no` per annullare."
             )
@@ -535,7 +593,7 @@ async def _process_link(client: Client, message: Message, url: str, channel_id: 
             return
 
     # ─── Normal flow: extract info ───
-    status_msg = await message.reply_text("🔍 Analisi del link in corso...")
+    status_msg = await _safe_reply(message, "🔍 Analisi del link in corso...")
     try:
         loop = asyncio.get_running_loop()
         info = await loop.run_in_executor(None, extract_info, url)
@@ -575,20 +633,20 @@ async def _handle_selection(
                 url = pending.get("url", "")
                 _clear_pending(user_id)
                 _log(f"Re-upload richiesto: {filepath}")
-                status_msg = await message.reply_text(f"📤 Invio file esistente: **{_escape_md(title)}**...")
+                status_msg = await _safe_reply(message, f"📤 Invio file esistente: **{_escape_md(title)}**...")
                 await _upload_existing(client, status_msg, filepath, title, channel_id, url)
             elif action == "retry_download":
                 # Retry the full download process
                 url = pending["url"]
                 _clear_pending(user_id)
                 _log(f"Retry download: {url}")
-                status_msg = await message.reply_text("🔍 Analisi del link in corso...")
+                status_msg = await _safe_reply(message, "🔍 Analisi del link in corso...")
                 await _process_link(client, message, url, channel_id)
             else:
                 _clear_pending(user_id)
         else:
             _clear_pending(user_id)
-            await message.reply_text("👌 Operazione annullata.")
+            await _safe_reply(message, "👌 Operazione annullata.")
         return
 
     # ─── Playlist menu ───
@@ -609,19 +667,19 @@ async def _handle_selection(
         try:
             num = int(text_lower)
         except ValueError:
-            await message.reply_text("❌ Scrivi il NUMERO del video (o `next`/`prev`).")
+            await _safe_reply(message, "❌ Scrivi il NUMERO del video (o `next`/`prev`).")
             return
         if not (1 <= num <= len(videos)):
-            await message.reply_text(f"❌ Numero tra 1 e {len(videos)}.")
+            await _safe_reply(message, f"❌ Numero tra 1 e {len(videos)}.")
             return
 
         video = videos[num - 1]
         video_url = video.get("webpage_url") or video.get("url", "")
         if not video_url:
-            await message.reply_text("❌ URL del video non disponibile.")
+            await _safe_reply(message, "❌ URL del video non disponibile.")
             return
 
-        status_msg = await message.reply_text("🔍 Analisi del video...")
+        status_msg = await _safe_reply(message, "🔍 Analisi del video...")
         try:
             loop = asyncio.get_running_loop()
             info = await loop.run_in_executor(None, extract_info, video_url)
@@ -646,14 +704,14 @@ async def _handle_selection(
         elif choice:
             label, quality = choice
         else:
-            await message.reply_text("❌ Scrivi `1`, `2`, `3` o `4`.")
+            await _safe_reply(message, "❌ Scrivi `1`, `2`, `3` o `4`.")
             return
 
         url = pending["url"]
         title = pending["title"]
         _clear_pending(user_id)
         _log(f"Qualità scelta da {user_id}: {quality}")
-        status_msg = await message.reply_text(f"⏳ Avvio download in qualità **{label}**...")
+        status_msg = await _safe_reply(message, f"⏳ Avvio download in qualità **{label}**...")
         await download_and_upload(client, status_msg, url, quality, title, channel_id)
         return
 
@@ -700,7 +758,7 @@ async def cmd_adduser(client: Client, message: Message, whitelist: Whitelist, ow
         return
     parts = (message.text or "").split()
     if len(parts) < 2:
-        await message.reply_text("❌ Uso: `/adduser @username` o `/adduser 123456789`")
+        await _safe_reply(message, "❌ Uso: `/adduser @username` o `/adduser 123456789`")
         return
     target = parts[1]
     if target.startswith("@"):
@@ -710,20 +768,20 @@ async def cmd_adduser(client: Client, message: Message, whitelist: Whitelist, ow
             display_name = f"@{user.username}" if user.username else user.first_name
         except Exception as e:
             _log(f"get_users fallito per {target}: {e!r}")
-            await message.reply_text(f"❌ Impossibile trovare `{target}`.")
+            await _safe_reply(message, f"❌ Impossibile trovare `{target}`.")
             return
     else:
         try:
             user_id = int(target)
             display_name = str(user_id)
         except ValueError:
-            await message.reply_text("❌ Formato non valido.")
+            await _safe_reply(message, "❌ Formato non valido.")
             return
     if whitelist.is_authorized(user_id):
-        await message.reply_text(f"ℹ️ {display_name} è già autorizzato.")
+        await _safe_reply(message, f"ℹ️ {display_name} è già autorizzato.")
         return
     whitelist.add(user_id, username=target, added_by=str(message.from_user.id))
-    await message.reply_text(f"✅ {display_name} aggiunto alla whitelist.")
+    await _safe_reply(message, f"✅ {display_name} aggiunto alla whitelist.")
 
 
 async def cmd_removeuser(client: Client, message: Message, whitelist: Whitelist, owner_id: int) -> None:
@@ -731,7 +789,7 @@ async def cmd_removeuser(client: Client, message: Message, whitelist: Whitelist,
         return
     parts = (message.text or "").split()
     if len(parts) < 2:
-        await message.reply_text("❌ Uso: `/removeuser @username` o `/removeuser 123456789`")
+        await _safe_reply(message, "❌ Uso: `/removeuser @username` o `/removeuser 123456789`")
         return
     target = parts[1]
     if target.startswith("@"):
@@ -741,18 +799,18 @@ async def cmd_removeuser(client: Client, message: Message, whitelist: Whitelist,
                 user_id = uid
                 break
         if user_id is None:
-            await message.reply_text(f"❌ {target} non trovato.")
+            await _safe_reply(message, f"❌ {target} non trovato.")
             return
     else:
         try:
             user_id = int(target)
         except ValueError:
-            await message.reply_text("❌ Formato non valido.")
+            await _safe_reply(message, "❌ Formato non valido.")
             return
     if whitelist.remove(user_id):
-        await message.reply_text(f"✅ {target} rimosso.")
+        await _safe_reply(message, f"✅ {target} rimosso.")
     else:
-        await message.reply_text(f"❌ {target} non era nella whitelist.")
+        await _safe_reply(message, f"❌ {target} non era nella whitelist.")
 
 
 async def cmd_users(client: Client, message: Message, whitelist: Whitelist, owner_id: int) -> None:
@@ -760,27 +818,27 @@ async def cmd_users(client: Client, message: Message, whitelist: Whitelist, owne
         return
     users = whitelist.get_all()
     if not users:
-        await message.reply_text("📭 Nessun utente nella whitelist.")
+        await _safe_reply(message, "📭 Nessun utente nella whitelist.")
         return
     lines = []
     for uid, udata in users.items():
         username = udata.get("username", str(uid))
         added_at = udata.get("added_at", "?")[:10]
         lines.append(f"• `{uid}` — {username} (dal {added_at})")
-    await message.reply_text(f"**📋 Autorizzati ({len(users)}):**\n" + "\n".join(lines))
+    await _safe_reply(message, f"**📋 Autorizzati ({len(users)}):**\n" + "\n".join(lines))
 
 
 async def cmd_channel(client: Client, message: Message, channel_id: int) -> None:
     try:
         chat = await client.get_chat(channel_id)
         name = chat.title or str(channel_id)
-        await message.reply_text(f"📺 Canale: **{name}** (`{channel_id}`)")
+        await _safe_reply(message, f"📺 Canale: **{name}** (`{channel_id}`)")
     except Exception:
-        await message.reply_text(f"📺 Canale: `{channel_id}`")
+        await _safe_reply(message, f"📺 Canale: `{channel_id}`")
 
 
 async def cmd_status(client: Client, message: Message):
-    await message.reply_text(f"📊 Download in corso: {'sì' if _is_downloading else 'no'}")
+    await _safe_reply(message, f"📊 Download in corso: {'sì' if _is_downloading else 'no'}")
 
 
 async def cmd_stop(client: Client, message: Message, owner_id: int) -> None:
@@ -790,14 +848,12 @@ async def cmd_stop(client: Client, message: Message, owner_id: int) -> None:
     global _cancel_requested
     if _is_downloading:
         _cancel_requested = True
-        await message.reply_text("🛑 Interruzione richiesta... il processo verrà fermato al prossimo ciclo.")
+        await _safe_reply(message, "🛑 Interruzione richiesta... il processo verrà fermato al prossimo ciclo.")
         _log("Stop richiesto dall'utente")
     else:
         # Nothing in progress: just clean any leftover files
         removed = cleanup_orphan_files()
-        await message.reply_text(
-            f"📭 Nessun download in corso. Puliti {len(removed)} file residui."
-        )
+        await _safe_reply(message, f"📭 Nessun download in corso. Puliti {len(removed)} file residui.")
 
 
 # ─── Handler registration ───

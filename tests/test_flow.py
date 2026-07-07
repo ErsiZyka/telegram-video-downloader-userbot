@@ -26,6 +26,16 @@ def test_upload_existing_accepts_url():
     assert "url" in sig.parameters
 
 
+def test_safe_reply_not_recursive():
+    """Regression: _safe_reply must call message.reply_text, NOT itself (sed corruption bug)."""
+    import inspect
+    src = inspect.getsource(h._safe_reply)
+    assert "_safe_reply(message, text)" not in src, \
+        "_safe_reply chiama sé stessa ricorsivamente!"
+    assert "message.reply_text(text)" in src, \
+        "_safe_reply deve chiamare message.reply_text"
+
+
 class FakeMessage:
     """Minimal stand-in for pyrogram.types.Message."""
     def __init__(self, text, user_id=111222333, chat_id=123):
