@@ -128,9 +128,151 @@ async def download_and_upload(
     quality: str,
     title: str,
     channel_id: int,
+    max_retries: int = 3,
 ) -> None:
-    """Download video and upload to channel with progress updates. (Stub)"""
-    await status_msg.edit_text(f"⏳ Download in corso: {title} ({quality}p)...")
+    """
+    Full download → upload → cleanup flow with progress, retry, and error handling.
+    """
+    import time as time_module
+
+    # Register this download in the queue
+    current_task = asyncio.current_task()
+    if current_task:
+        _download_queue.append(current_task)
+
+    try:
+        last_progress_update = 0
+        progress_interval = 2
+
+        def progress_callback(downloaded_mb: float, total_mb: float, speed_mbps: float, eta: int) -> None:
+            nonlocal last_progress_update
+            now = time_module.time()
+            if now - last_progress_update < progress_interval:
+                return
+            last_progress_update = now
+
+            from bot.downloader import format_size, format_speed, format_eta
+
+            pct = (downloaded_mb / total_mb * 100) if total_mb > 0 else 0
+            text = (
+                f"⏳ **Download in corso...**\n"
+                f"▫️ {format_size(downloaded_mb)}"
+            )
+            if total_mb > 0:
+                text += f" / {format_size(total_mb)}"
+            text += f"\n▫️ Velocità: {format_speed(speed_mbps)}"
+            if eta and int(eta) > 0:
+                text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
+            text += f"\n▫️ {pct:.0f}%"
+
+            asyncio.get_event_loop().create_task(
+                status_msg.edit_text(text)
+            )
+
+        # ─── Download phase ───
+        filepath = None
+        download_error = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    await status_msg.edit_text(
+                        f"⏳ Download (tentativo {attempt}/{max_retries})..."
+                    )
+
+                loop = asyncio.get_event_loop()
+                filepath = await loop.run_in_executor(
+                    None,
+                    download_video,
+                    url,
+                    quality,
+                    progress_callback,
+                    1,
+                )
+                break
+            except DownloadError as e:
+                download_error = str(e)
+                if attempt < max_retries:
+                    wait = 2 ** (attempt - 1)
+                    await asyncio.sleep(wait)
+            except Exception as e:
+                download_error = str(e)
+                cleanup_orphan_files()
+                await status_msg.edit_text(f"❌ Download fallito: {download_error}")
+                return
+
+        if filepath is None:
+            cleanup_orphan_files()
+            await status_msg.edit_text(
+                f"❌ Download fallito dopo {max_retries} tentativi.\n"
+                f"Errore: {download_error}"
+            )
+            return
+
+        # Check file size before upload
+        file_size_bytes = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        file_size_gb = file_size_mb / 1024
+
+        if file_size_gb > 2:
+            os.remove(filepath)
+            await status_msg.edit_text(
+                f"❌ Il file scaricato supera il limite di Telegram (2GB).\n"
+                f"Dimensione: {file_size_gb:.1f} GB"
+            )
+            return
+
+        # ─── Upload phase ───
+        from bot.downloader import format_size
+
+        caption = title if title else "Video scaricato"
+        upload_success = False
+        upload_error = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    await status_msg.edit_text(
+                        f"📤 Upload (tentativo {attempt}/{max_retries})..."
+                    )
+                else:
+                    await status_msg.edit_text(
+                        f"✅ Download completato ({format_size(file_size_mb)})\n"
+                        f"📤 Upload in corso al canale..."
+                    )
+
+                await client.send_video(
+                    chat_id=channel_id,
+                    video=filepath,
+                    caption=caption,
+                )
+                upload_success = True
+                break
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+            except Exception as e:
+                upload_error = str(e)
+                if attempt < max_retries:
+                    wait = 2 ** (attempt - 1)
+                    await asyncio.sleep(wait)
+
+        # ─── Cleanup ───
+        if os.path.exists(filepath):
+            os.remove(filepath)
+
+        if upload_success:
+            await status_msg.edit_text("✅ Video inviato con successo al canale!")
+        else:
+            await status_msg.edit_text(
+                f"❌ Upload fallito dopo {max_retries} tentativi.\n"
+                f"Errore: {upload_error}\n"
+                f"File eliminato dal disco."
+            )
+
+    finally:
+        # Remove from queue when done
+        if current_task and current_task in _download_queue:
+            _download_queue.remove(current_task)
 
 
 # ─── Message handler ───
@@ -149,6 +291,19 @@ async def on_message(
     if not url:
         return
 
+    # ─── Queue gate: prevent concurrent downloads ───
+    global _download_queue
+    _download_queue = [t for t in _download_queue if not t.done()]
+
+    if _download_queue:
+        position = len(_download_queue) + 1
+        await message.reply_text(
+            f"⏳ C'è già un download in corso. "
+            f"Il tuo link è in coda (posizione #{position}). "
+            f"Riprova quando il download corrente è completato."
+        )
+        return
+
     status_msg = await message.reply_text("🔍 Analisi del link in corso...")
 
     try:
@@ -163,6 +318,7 @@ async def on_message(
 
             keyboard = build_playlist_keyboard(info, page=0)
             total = len(info)
+            _playlist_cache[str(status_msg.id)] = {"videos": info, "url": url}
             await status_msg.edit_text(
                 f"📋 **Playlist trovata**: {total} video\n"
                 f"Scegli quali video scaricare:",
