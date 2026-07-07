@@ -1,0 +1,5 @@
+pyrogram>=2.0.0
+yt-dlp>=2024.0.0
+python-dotenv>=1.0.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
