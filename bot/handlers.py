@@ -438,20 +438,120 @@ async def on_callback(
 
 # ─── Admin commands (stubs — Task 9) ───
 
-async def cmd_adduser(client: Client, message: Message, whitelist: Whitelist, owner_id: int):
-    await message.reply_text("Comando /adduser — da implementare nel Task 9.")
+async def cmd_adduser(client: Client, message: Message, whitelist: Whitelist, owner_id: int) -> None:
+    """
+    Add a user to the whitelist. Usage: /adduser @username or /adduser 123456789
+    """
+    if message.from_user.id != owner_id:
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply_text(
+            "❌ Uso: `/adduser @username` o `/adduser 123456789`"
+        )
+        return
+
+    target = parts[1]
+
+    if target.startswith("@"):
+        username = target
+        try:
+            user = await client.get_users(target)
+            user_id = user.id
+            display_name = f"@{user.username}" if user.username else user.first_name
+        except Exception:
+            await message.reply_text(
+                f"❌ Impossibile trovare l'utente `{target}`. "
+                f"Assicurati che abbia mai interagito con questo account."
+            )
+            return
+    else:
+        try:
+            user_id = int(target)
+            username = str(user_id)
+            display_name = str(user_id)
+        except ValueError:
+            await message.reply_text(
+                "❌ Formato non valido. Usa `/adduser @username` o `/adduser 123456789`"
+            )
+            return
+
+    if whitelist.is_authorized(user_id):
+        await message.reply_text(f"ℹ️ {display_name} è già autorizzato.")
+        return
+
+    whitelist.add(user_id, username=username, added_by=str(message.from_user.id))
+    await message.reply_text(f"✅ {display_name} aggiunto alla whitelist.")
 
 
-async def cmd_removeuser(client: Client, message: Message, whitelist: Whitelist, owner_id: int):
-    await message.reply_text("Comando /removeuser — da implementare nel Task 9.")
+async def cmd_removeuser(client: Client, message: Message, whitelist: Whitelist, owner_id: int) -> None:
+    """
+    Remove a user from the whitelist. Usage: /removeuser @username or /removeuser 123456789
+    """
+    if message.from_user.id != owner_id:
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply_text(
+            "❌ Uso: `/removeuser @username` o `/removeuser 123456789`"
+        )
+        return
+
+    target = parts[1]
+
+    if target.startswith("@"):
+        all_users = whitelist.get_all()
+        user_id = None
+        for uid, data in all_users.items():
+            if data.get("username", "").lower() == target.lower():
+                user_id = uid
+                break
+        if user_id is None:
+            await message.reply_text(f"❌ {target} non trovato nella whitelist.")
+            return
+    else:
+        try:
+            user_id = int(target)
+        except ValueError:
+            await message.reply_text("❌ Formato non valido.")
+            return
+
+    if whitelist.remove(user_id):
+        await message.reply_text(f"✅ {target} rimosso dalla whitelist.")
+    else:
+        await message.reply_text(f"❌ {target} non era nella whitelist.")
 
 
-async def cmd_users(client: Client, message: Message, whitelist: Whitelist, owner_id: int):
-    await message.reply_text("Comando /users — da implementare nel Task 9.")
+async def cmd_users(client: Client, message: Message, whitelist: Whitelist, owner_id: int) -> None:
+    """List all whitelisted users."""
+    if message.from_user.id != owner_id:
+        return
+
+    users = whitelist.get_all()
+    if not users:
+        await message.reply_text("📭 Nessun utente nella whitelist.")
+        return
+
+    lines = []
+    for uid, data in users.items():
+        username = data.get("username", str(uid))
+        added_at = data.get("added_at", "?")[:10]
+        lines.append(f"• `{uid}` — {username} (dal {added_at})")
+
+    text = f"**📋 Utenti autorizzati ({len(users)}):**\n" + "\n".join(lines)
+    await message.reply_text(text)
 
 
-async def cmd_channel(client: Client, message: Message, channel_id: int):
-    await message.reply_text(f"Canale corrente: `{channel_id}`")
+async def cmd_channel(client: Client, message: Message, channel_id: int) -> None:
+    """Show the current target channel."""
+    try:
+        chat = await client.get_chat(channel_id)
+        name = chat.title or str(channel_id)
+        await message.reply_text(f"📺 Canale di destinazione: **{name}** (`{channel_id}`)")
+    except Exception:
+        await message.reply_text(f"📺 Canale di destinazione: `{channel_id}`")
 
 
 async def cmd_status(client: Client, message: Message):
