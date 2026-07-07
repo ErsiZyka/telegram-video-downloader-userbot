@@ -6,5 +6,4 @@ downloads/*
 __pycache__/
 .pytest_cache/
 *.pyc
-data/whitelist.json
-data/download_history.json
+data/*.json
