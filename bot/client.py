@@ -1,19 +1,17 @@
-"""Pyrogram client factory."""
+"""Telethon client factory."""
 
-from pyrogram import Client
+from telethon import TelegramClient
 
 
-def create_client(api_id: int, api_hash: str, session_name: str = "my_video_downloader_bot") -> Client:
+def create_client(api_id: int, api_hash: str, session_name: str = "my_video_downloader_bot") -> TelegramClient:
     """
-    Create and return a Pyrogram Client instance.
+    Create and return a Telethon TelegramClient instance.
 
-    workers=32 ensures the dispatcher thread pool can handle rapid RPC
-    responses during file upload, preventing pipeline stalls.
+    The session file will be stored as '{session_name}.session' in the
+    current working directory. cryptg is used for AES-NI acceleration.
     """
-    return Client(
-        name=session_name,
+    return TelegramClient(
+        session=session_name,
         api_id=api_id,
         api_hash=api_hash,
-        workdir=".",
-        workers=32,
     )
