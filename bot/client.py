@@ -7,12 +7,13 @@ def create_client(api_id: int, api_hash: str, session_name: str = "my_video_down
     """
     Create and return a Pyrogram Client instance.
 
-    The session file will be stored as '{session_name}.session' in the
-    current working directory.
+    workers=32 ensures the dispatcher thread pool can handle rapid RPC
+    responses during file upload, preventing pipeline stalls.
     """
     return Client(
         name=session_name,
         api_id=api_id,
         api_hash=api_hash,
         workdir=".",
+        workers=32,
     )

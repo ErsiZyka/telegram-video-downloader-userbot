@@ -22,6 +22,12 @@ except Exception:
 
 from dotenv import load_dotenv
 
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass
+
 from pyrogram import idle
 
 from bot.client import create_client
