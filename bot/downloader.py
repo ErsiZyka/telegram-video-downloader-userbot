@@ -290,6 +290,7 @@ def download_video(
         "progress_hooks": [_make_progress_hook()],
         "socket_timeout": 30,
         "retries": 5,
+        "fragment_retries": 5,
     }
     ydl_opts.update(_get_ydl_cookie_opts())
     if extra_headers:

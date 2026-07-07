@@ -241,15 +241,14 @@ async def download_and_upload(
 
     try:
         last_progress = 0.0
+        last_log_progress = 0.0  # separate throttle for the log file
 
         def download_progress(downloaded_mb, total_mb, speed_mbps, eta) -> None:
-            nonlocal last_progress
+            nonlocal last_progress, last_log_progress
             if _cancel_requested:
                 raise CancelDownload("stop")
             now = time_module.time()
             if now - last_progress < 3:
-                return
-            if now < _edit_muted_until:
                 return
             last_progress = now
             pct = (downloaded_mb / total_mb * 100) if total_mb > 0 else 0
@@ -260,7 +259,17 @@ async def download_and_upload(
             if eta and int(eta) > 0:
                 text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
             text += f"\n▫️ {pct:.0f}%"
-            asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
+            # Edit the Telegram message only when not muted by FloodWait.
+            if now >= _edit_muted_until:
+                asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
+            # Always log progress to the file/console every 5s so the log
+            # window shows the download is alive even when Telegram edits are muted.
+            if now - last_log_progress >= 5:
+                last_log_progress = now
+                tot_str = f"/{total_mb:.0f}MB" if total_mb > 0 else ""
+                eta_str = f" eta={int(eta)}s" if eta and int(eta) > 0 else ""
+                _log(f"Progress: {downloaded_mb:.0f}MB{tot_str} {pct:.0f}% "
+                     f"{format_speed(speed_mbps)}{eta_str}")
 
         filepath = None
         download_error = None
@@ -807,9 +816,15 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
         _log(f"Qualità scelta da {user_id}: {quality}")
         queue = _get_queue()
         pos = queue.add(url, quality, title, headers)
-        if _current_item is None and pos == 1:
-            await _safe_reply(event, f"⏳ Avvio download in qualità **{label}**...")
+        if _current_item is None:
+            # Niente in lavorazione: questo parte subito (o è il primo dopo cleanup).
+            if pos == 1:
+                await _safe_reply(event, f"⏳ Avvio download in qualità **{label}**...")
+            else:
+                await _safe_reply(event,
+                    f"📥 Aggiunto alla coda (posizione {pos}). Avvio a breve.")
         else:
+            # Un download è in corso: questo verrà processato dopo.
             await _safe_reply(event,
                 f"📥 Aggiunto alla coda (posizione {pos}). "
                 f"Verrà scaricato al termine di quello in corso.")
