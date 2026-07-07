@@ -49,6 +49,30 @@ def format_eta(seconds: int | None | float) -> str:
 
 import yt_dlp
 import os
+import re
+
+
+# Some yt-dlp extractors only match specific subdomains (e.g. YouPorn matches
+# only www.youporn.com or youporn.com). URLs with other subdomains (it., de.,
+# etc.) fall back to the generic extractor which often grabs the wrong asset
+# (e.g. a 0-byte SVG avatar). Normalize known subdomains to the canonical one.
+_URL_NORMALIZERS = [
+    # youporn: any subdomain -> www.youporn.com
+    (re.compile(r'^https?://(?!www\.)[a-z]{2,}\.youporn\.com/', re.IGNORECASE),
+     lambda m: m.group(0).replace(m.group(0).split('//')[1].split('.')[0] + '.', 'www.', 1)),
+]
+
+
+def _normalize_url(url: str) -> str:
+    """Rewrite known subdomain issues so yt-dlp picks the right extractor."""
+    for pattern, repl in _URL_NORMALIZERS:
+        if pattern.search(url):
+            # replace the subdomain with www.
+            head = url.split('//', 1)
+            rest = head[1]
+            sub, _, remainder = rest.partition('.')
+            url = head[0] + '//www.' + remainder
+    return url
 
 
 def _get_ydl_cookie_opts() -> dict:
@@ -83,6 +107,7 @@ def extract_info(url: str) -> dict | list[dict]:
         "skip_download": True,
     }
     ydl_opts.update(_get_ydl_cookie_opts())
+    url = _normalize_url(url)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -254,6 +279,7 @@ def download_video(
         "retries": 5,
     }
     ydl_opts.update(_get_ydl_cookie_opts())
+    url = _normalize_url(url)
 
     last_error = None
 
