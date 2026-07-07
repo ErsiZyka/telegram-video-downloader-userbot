@@ -333,7 +333,7 @@ async def download_and_upload(
                     uploaded = await upload_file(client, f, progress_callback=upload_progress)
                 await client.send_file(
                     channel_id, file=uploaded, caption=caption,
-                    attributes=[DocumentAttributeVideo(duration=0, supports_streaming=True)],
+                    attributes=[DocumentAttributeVideo(duration=0, w=0, h=0, supports_streaming=True)],
                 )
                 upload_success = True
                 _log("Upload completato con successo")
@@ -445,7 +445,7 @@ async def _upload_existing(
                 uploaded = await upload_file(client, f, progress_callback=upload_progress)
             await client.send_file(
                 channel_id, file=uploaded, caption=caption,
-                attributes=[DocumentAttributeVideo(duration=0, supports_streaming=True)],
+                attributes=[DocumentAttributeVideo(duration=0, w=0, h=0, supports_streaming=True)],
             )
             upload_success = True
             _log("Upload esistente completato")
