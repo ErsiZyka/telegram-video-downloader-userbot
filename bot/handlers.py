@@ -108,7 +108,13 @@ def _clear_pending(user_id: int) -> None:
 
 def extract_url(text: str) -> str | None:
     match = re.search(URL_REGEX, text)
-    return match.group(1) if match else None
+    if not match:
+        return None
+    url = match.group(1)
+    # Strip trailing punctuation that often gets pasted along with the URL
+    # (quotes, commas, periods, closing parens/brackets, colons, semicolons).
+    url = url.rstrip("\"'.,);:]")
+    return url
 
 
 def _escape_md(text: str) -> str:
@@ -624,6 +630,20 @@ async def _upload_existing(
 
 async def _process_link(client, event, url: str, channel_id: int) -> None:
     user_id = event.sender_id
+
+    # vidxgo / vidplay player URLs only work embedded inside a parent page
+    # (altadefinizione, streamingcommunity). Direct navigation returns 403/404.
+    # Tell the user to send the movie/series page URL instead.
+    _lower = url.lower()
+    if "vidxgo.co" in _lower or "vidplay." in _lower or "vidplaylink" in _lower:
+        _log(f"Link player diretto non supportato: {url}")
+        await _safe_reply(event,
+            "❌ Questo è un link del **player** (vidxgo/vidplay) che funziona solo "
+            "incorporato nella pagina del sito.\n\n"
+            "📎 Invia invece il link della **pagina del film/serie** su "
+            "altadefinizione o streamingcommunity, e il bot troverà il video "
+            "automaticamente.")
+        return
 
     # Streaming-site extractors (Playwright) take priority over yt-dlp for
     # Cloudflare-protected sites (streamingcommunity, altadefinizione) that
