@@ -115,3 +115,150 @@ def extract_info(url: str) -> dict | list[dict]:
         raise ExtractError(f"Link non supportato o video non disponibile: {msg}")
     except Exception as e:
         raise ExtractError(f"Errore durante l'estrazione: {str(e)}")
+
+
+import os
+import subprocess
+import time
+
+
+def check_dependencies() -> tuple[bool, str]:
+    """
+    Verify yt-dlp and ffmpeg are installed.
+
+    Returns:
+        (ok, error_message) — ok is True if all deps present.
+    """
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return False, "yt-dlp non è installato. Installa con: pip install yt-dlp"
+    except FileNotFoundError:
+        return False, "yt-dlp non è installato. Installa con: pip install yt-dlp"
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return False, "ffmpeg non è installato. Installa da: https://ffmpeg.org/download.html"
+    except FileNotFoundError:
+        return False, "ffmpeg non è installato. Installa da: https://ffmpeg.org/download.html"
+
+    return True, ""
+
+
+def download_video(
+    url: str,
+    quality: str,
+    progress_callback,
+    max_retries: int = 3,
+) -> str:
+    """
+    Download a video at the specified quality with retry logic.
+
+    Args:
+        url: Video URL
+        quality: One of "360", "720", "1080", "max"
+        progress_callback: callable(downloaded_mb, total_mb, speed_mbps, eta_seconds)
+        max_retries: Number of download attempts before giving up
+
+    Returns:
+        Path to the downloaded file
+
+    Raises:
+        DownloadError: if download fails after all retries
+        ValueError: if quality is invalid
+    """
+    if quality not in QUALITY_FORMATS:
+        raise ValueError(f"Qualità non valida: {quality}. Usa: {list(QUALITY_FORMATS.keys())}")
+
+    format_str = QUALITY_FORMATS[quality]
+    output_template = os.path.join("downloads", "%(title).100s.%(ext)s")
+
+    def _make_progress_hook():
+        """Create a yt-dlp progress hook that calls our callback."""
+
+        def hook(d: dict) -> None:
+            if d["status"] == "downloading":
+                downloaded = d.get("downloaded_bytes", 0) or 0
+                total = d.get("total_bytes", 0) or d.get("total_bytes_estimate", 0) or 0
+                speed = d.get("speed", 0) or 0
+
+                downloaded_mb = downloaded / (1024 * 1024)
+                total_mb = total / (1024 * 1024) if total else 0
+                speed_mbps = speed / (1024 * 1024) if speed else 0
+                eta = d.get("eta")
+
+                progress_callback(downloaded_mb, total_mb, speed_mbps, eta)
+
+        return hook
+
+    ydl_opts = {
+        "format": format_str,
+        "outtmpl": output_template,
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "progress_hooks": [_make_progress_hook()],
+        "socket_timeout": 30,
+        "retries": 5,
+    }
+
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+
+                # After merge, the extension might be .mp4 or .mkv
+                if not os.path.exists(filename):
+                    base = os.path.splitext(filename)[0]
+                    if os.path.exists(base + ".mp4"):
+                        filename = base + ".mp4"
+                    elif os.path.exists(base + ".mkv"):
+                        filename = base + ".mkv"
+
+                return filename
+
+        except yt_dlp.utils.DownloadError as e:
+            last_error = str(e)
+        except Exception as e:
+            last_error = str(e)
+
+        if attempt < max_retries:
+            wait = 2 ** (attempt - 1)  # 1s, 2s, 4s
+            time.sleep(wait)
+
+    # Cleanup any partial file
+    cleanup_orphan_files()
+
+    raise DownloadError(
+        f"Download fallito dopo {max_retries} tentativi: {last_error}"
+    )
+
+
+def cleanup_orphan_files(download_dir: str = "downloads") -> list[str]:
+    """
+    Remove all files from the download directory.
+
+    Returns list of removed file paths.
+    """
+    removed = []
+    if os.path.isdir(download_dir):
+        for f in os.listdir(download_dir):
+            path = os.path.join(download_dir, f)
+            if os.path.isfile(path) and f != ".gitkeep":
+                os.remove(path)
+                removed.append(path)
+    return removed
