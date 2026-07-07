@@ -105,11 +105,43 @@ video_downloader_bot/
 └── tests/
     ├── test_whitelist.py
     ├── test_downloader.py
-    └── test_handlers.py
+    ├── test_handlers.py
+    └── test_flow.py
 ```
 
-## Limitazioni
+## Comandi disponibili
 
-- Limite Telegram: 2GB per file video
-- Alcuni siti potrebbero bloccare yt-dlp; aggiornalo regolarmente (`pip install -U yt-dlp`)
-- L'userbot deve essere admin del canale di destinazione
+| Comando | Descrizione |
+|---------|-------------|
+| `/adduser @username` | Aggiunge un utente alla whitelist |
+| `/removeuser @username` | Rimuove dalla whitelist |
+| `/users` | Elenca gli utenti autorizzati |
+| `/channel` | Mostra il canale di destinazione |
+| `/status` | Download in corso? |
+| `/stop` | Ferma download/upload e pulisce file |
+
+## Limitazioni note
+
+### Velocita upload
+Telegram limita la banda per account non-Premium a circa 2-5 MB/s per connessione.
+Pyrogram usa una singola connessione TCP MTProto, quindi questo e' il tetto massimo.
+
+**Ottimizzazioni applicate:**
+- tgcrypto (crittografia C) - obbligatorio per performance decenti
+- workers=32 nel Client Pyrogram
+- Progress bar ogni 5s + rispetto FloodWait
+
+**Cose provate e smentite:**
+- uvloop: non supporta Windows
+- cryptogram: piu' lento di tgcrypto (205 vs 293 MB/s)
+- pyro-tg-fork: non esiste su PyPI
+- Upload parallelo: richiede Telethon + FastTelethon (riscrivere tutto)
+
+**Per superare 5 MB/s:** Telegram Premium o riscrivere in Telethon + FastTelethon.
+
+### Altri limiti
+- File video: max 2 GB (limite Telegram)
+- YouTube: richiede cookie browser (COOKIES_FROM_BROWSER in .env)
+- Userbot deve essere admin del canale
+- I bottoni inline NON funzionano con userbot (interazione via testo)
+- yt-dlp va aggiornato: pip install -U yt-dlp
