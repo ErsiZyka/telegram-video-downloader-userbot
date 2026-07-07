@@ -15,6 +15,7 @@ from telethon.errors import FloodWaitError
 from telethon.tl.types import DocumentAttributeVideo
 
 from bot.whitelist import Whitelist
+from bot.extractors import get_extractor
 from bot.downloader import (
     extract_info,
     download_video,
@@ -179,7 +180,7 @@ async def _safe_delete(msg) -> None:
 
 # ─── Menu senders ───
 
-async def _send_quality_menu(event, user_id: int, url: str, title: str) -> None:
+async def _send_quality_menu(event, user_id: int, url: str, title: str, headers: dict | None = None) -> None:
     menu = await _safe_reply(event,
         f"🎬 **{_escape_md(title)}**\n\n"
         f"Scrivi qui il NUMERO della qualità:\n"
@@ -188,7 +189,8 @@ async def _send_quality_menu(event, user_id: int, url: str, title: str) -> None:
     if menu is None:
         _log("Menu qualità non inviato (FloodWait?)")
         return
-    _set_pending(user_id, {"type": "quality", "url": url, "title": title})
+    _set_pending(user_id, {"type": "quality", "url": url, "title": title,
+                           "headers": headers or {}})
     _log(f"Menu qualità inviato a {user_id}")
 
 
@@ -222,6 +224,7 @@ async def _send_playlist_menu(event, user_id: int, videos: list, url: str, page:
 async def download_and_upload(
     client, status_msg, url: str, quality: str, title: str,
     channel_id: int, owner_id: int, max_retries: int = 3,
+    headers: dict | None = None,
 ) -> str:
     """Download then upload a video. Returns outcome: 'ok' | 'error' | 'cancelled'.
 
@@ -270,6 +273,7 @@ async def download_and_upload(
                     await _safe_edit(status_msg, f"⏳ Download (tentativo {attempt}/{max_retries})...")
                 filepath = await loop.run_in_executor(
                     None, download_video, url, quality, download_progress, 1,
+                    headers,
                 )
                 _log(f"Download completato: {filepath}")
                 break
@@ -456,13 +460,15 @@ async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
         url = item["url"]
         quality = item.get("quality", "720")
         title = item.get("title", "Video")
+        headers = item.get("headers") or None
         _log(f"Worker processa: {url} [{quality}]")
         try:
             status_msg = await client.send_message(
                 owner_id, f"⏳ Avvio download: **{_escape_md(title)}** [{quality}]..."
             )
             await download_and_upload(
-                client, status_msg, url, quality, title, channel_id, owner_id
+                client, status_msg, url, quality, title, channel_id, owner_id,
+                headers=headers,
             )
         except Exception as e:
             _log(f"Worker errore inatteso su {url}: {e!r}")
@@ -607,6 +613,24 @@ async def _upload_existing(
 
 async def _process_link(client, event, url: str, channel_id: int) -> None:
     user_id = event.sender_id
+
+    # Streaming-site extractors (Playwright) take priority over yt-dlp for
+    # Cloudflare-protected sites (streamingcommunity, altadefinizione) that
+    # yt-dlp can't handle. They return a direct m3u8 URL + the anti-leech
+    # headers the CDN requires.
+    extractor = get_extractor(url)
+    if extractor is not None:
+        status_msg = await _safe_reply(event, "🌐 Estrazione video via browser...")
+        try:
+            loop = asyncio.get_running_loop()
+            info = await extractor.extract(url)
+            _log(f"Extractor ok: {info.url}")
+            await _safe_delete(status_msg)
+            await _send_quality_menu(event, user_id, info.url, info.title, info.headers)
+        except Exception as e:
+            _log(f"Extractor fallito: {e!r}")
+            await _safe_edit(status_msg, f"❌ Estrazione fallita: {e}")
+        return
 
     entry = _get_history().get(url)
     if entry:
@@ -776,10 +800,11 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
 
         url = pending["url"]
         title = pending["title"]
+        headers = pending.get("headers", {})
         _clear_pending(user_id)
         _log(f"Qualità scelta da {user_id}: {quality}")
         queue = _get_queue()
-        pos = queue.add(url, quality, title)
+        pos = queue.add(url, quality, title, headers)
         if _current_item is None and pos == 1:
             await _safe_reply(event, f"⏳ Avvio download in qualità **{label}**...")
         else:

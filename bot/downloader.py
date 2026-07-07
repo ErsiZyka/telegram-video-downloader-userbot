@@ -87,7 +87,7 @@ def _get_ydl_cookie_opts() -> dict:
     return {"cookiesfrombrowser": (browser,)}
 
 
-def extract_info(url: str) -> dict | list[dict]:
+def extract_info(url: str, extra_headers: dict | None = None) -> dict | list[dict]:
     """
     Extract video/playlist metadata WITHOUT downloading.
 
@@ -107,6 +107,8 @@ def extract_info(url: str) -> dict | list[dict]:
         "skip_download": True,
     }
     ydl_opts.update(_get_ydl_cookie_opts())
+    if extra_headers:
+        ydl_opts["http_headers"] = dict(extra_headers)
     url = _normalize_url(url)
 
     try:
@@ -227,6 +229,7 @@ def download_video(
     quality: str,
     progress_callback,
     max_retries: int = 3,
+    extra_headers: dict | None = None,
 ) -> str:
     """
     Download a video at the specified quality with retry logic.
@@ -279,6 +282,8 @@ def download_video(
         "retries": 5,
     }
     ydl_opts.update(_get_ydl_cookie_opts())
+    if extra_headers:
+        ydl_opts["http_headers"] = dict(extra_headers)
     url = _normalize_url(url)
 
     last_error = None
