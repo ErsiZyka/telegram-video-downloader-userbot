@@ -891,6 +891,52 @@ async def cmd_channel(client, event, channel_id: int) -> None:
         await _safe_reply(event, f"📺 Canale: `{channel_id}`")
 
 
+async def cmd_queue(client, event, owner_id: int) -> None:
+    if event.sender_id != owner_id:
+        return
+    queue = _get_queue()
+    lines = []
+    if _current_item is not None:
+        lines.append(f"🎬 In corso: **{_escape_md((_current_item.get('title') or '')[:55])}** [{_current_item.get('quality','?')}]")
+    else:
+        lines.append("🎬 Nessun download in corso.")
+    items = queue.items
+    lines.append(f"\n📋 In coda ({len(items)}):")
+    if not items:
+        lines.append("_(vuota)_")
+    else:
+        for i, it in enumerate(items, 1):
+            lines.append(f"{i}. {_escape_md((it.get('title') or 'Sconosciuto')[:55])} [{it.get('quality','?')}]")
+    await _safe_reply(event, "\n".join(lines))
+
+
+async def cmd_now(client, event, owner_id: int) -> None:
+    if event.sender_id != owner_id:
+        return
+    parts = (event.message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await _safe_reply(event, "❌ Uso: `/now <url>`")
+        return
+    url = parts[1].strip()
+    queue = _get_queue()
+    if queue.move_front(url):
+        await _safe_reply(event, f"✅ Spostato in cima alla coda: `{url}`")
+    else:
+        await _safe_reply(event, f"❌ URL non presente in coda: `{url}`")
+
+
+async def cmd_clean(client, event, owner_id: int) -> None:
+    if event.sender_id != owner_id:
+        return
+    queue = _get_queue()
+    if queue.is_empty() and _current_item is None:
+        await _safe_reply(event, "📭 La coda è già vuota.")
+        return
+    n = len(queue.items)
+    await _safe_reply(event, f"🧹 Vuoi svuotare la coda ({n} item in attesa)? Scrivi `si` o `no`.")
+    _set_pending(event.sender_id, {"type": "confirm_clean"})
+
+
 async def cmd_status(client, event):
     queue = _get_queue()
     pending = len(queue.items)
@@ -954,5 +1000,14 @@ def register_handlers(client, whitelist: Whitelist, channel_id: int, owner_id: i
                 return
             elif text.startswith("/stop"):
                 await cmd_stop(client, event, owner_id)
+                return
+            elif text.startswith("/queue"):
+                await cmd_queue(client, event, owner_id)
+                return
+            elif text.startswith("/now"):
+                await cmd_now(client, event, owner_id)
+                return
+            elif text.startswith("/clean"):
+                await cmd_clean(client, event, owner_id)
                 return
         await on_message(client, event, whitelist, channel_id, owner_id)
