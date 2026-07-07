@@ -1,7 +1,9 @@
 """Wrapper around yt-dlp for video info extraction and downloading."""
 
 QUALITY_FORMATS = {
-    "360": "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
+    # "360" uses height<=480 fallback because some streaming CDNs (streamingcommunity/
+    # vixcloud) only offer 480p as the lowest tier — there is no 360p variant.
+    "360": "bestvideo[height<=480]+bestaudio/best[height<=480]/bestvideo+bestaudio/best",
     "720": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
     "1080": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
     "max": "bestvideo+bestaudio/best",
@@ -306,6 +308,27 @@ def download_video(
 
         except yt_dlp.utils.DownloadError as e:
             last_error = str(e)
+            # Some streaming CDNs offer discrete quality tiers (480/720/1080)
+            # and don't have a 360p variant. If the requested quality is not
+            # available, fall back to "best" once so the user still gets a video.
+            if "Requested format is not available" in last_error and ydl_opts.get("format") != "best":
+                fallback_opts = dict(ydl_opts)
+                fallback_opts["format"] = "best"
+                try:
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        filename = ydl.prepare_filename(info)
+                        if not os.path.exists(filename):
+                            base = os.path.splitext(filename)[0]
+                            if os.path.exists(base + ".mp4"):
+                                filename = base + ".mp4"
+                            elif os.path.exists(base + ".mkv"):
+                                filename = base + ".mkv"
+                        return filename
+                except yt_dlp.utils.DownloadError as e2:
+                    last_error = str(e2)
+                except Exception as e2:
+                    last_error = str(e2)
         except Exception as e:
             last_error = str(e)
 

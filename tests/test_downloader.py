@@ -10,7 +10,8 @@ from bot.downloader import (
 class TestQualityFormats:
     def test_360_format(self):
         fmt = QUALITY_FORMATS["360"]
-        assert "height<=360" in fmt
+        # 360 falls back to height<=480 for CDNs with no 360p tier (streamingcommunity)
+        assert "height<=480" in fmt
         assert "bestvideo" in fmt
         assert "bestaudio" in fmt
 
