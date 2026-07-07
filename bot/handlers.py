@@ -1,7 +1,9 @@
-"""Message handlers for the video downloader userbot (reply-based, no buttons).
+"""Message handlers for the video downloader userbot.
 
-NOTE: Userbots (user accounts) cannot receive callback queries — inline buttons
-do NOT work. All interaction is done via replies to menu messages.
+Userbot interaction model (NO callback buttons — those are bot-only):
+- User sends a link -> bot shows a numbered menu
+- User types the number (plain message, no need to reply) -> bot acts
+State is tracked per-user so a plain "2" message selects quality.
 """
 
 import re
@@ -29,10 +31,10 @@ URL_REGEX = r"(https?://[^\s]+)"
 # ─── Download concurrency control ───
 _is_downloading = False
 
-# ─── Pending menus: maps menu message_id -> state ───
-# state = {"type": "quality", "url": ..., "title": ...}
-#       | {"type": "playlist", "videos": [...], "url": ..., "page": int}
-_pending_menus: dict[int, dict] = {}
+# ─── Per-user pending action state ───
+# user_id -> {"type": "quality"|"playlist", ..., "ts": timestamp}
+_pending: dict[int, dict] = {}
+PENDING_TIMEOUT = 600  # 10 minutes
 
 # ─── Quality selection map (number -> (label, quality_key)) ───
 QUALITY_CHOICES = {
@@ -43,35 +45,41 @@ QUALITY_CHOICES = {
 }
 
 
+def _log(msg: str) -> None:
+    """Visible log line so the user can see what the bot is doing."""
+    try:
+        print(f"[bot] {msg}", flush=True)
+    except Exception:
+        pass
+
+
+def _set_pending(user_id: int, state: dict) -> None:
+    state["ts"] = time_module.time()
+    _pending[user_id] = state
+
+
+def _get_pending(user_id: int) -> dict | None:
+    state = _pending.get(user_id)
+    if not state:
+        return None
+    if time_module.time() - state.get("ts", 0) > PENDING_TIMEOUT:
+        _pending.pop(user_id, None)
+        return None
+    return state
+
+
+def _clear_pending(user_id: int) -> None:
+    _pending.pop(user_id, None)
+
+
 def extract_url(text: str) -> str | None:
     """Extract the first URL from a text message. Returns None if no URL found."""
     match = re.search(URL_REGEX, text)
     return match.group(1) if match else None
 
 
-# ─── Helpers for safe message editing (user accounts CAN edit their own messages) ───
-
-async def _safe_edit(msg: Message, text: str) -> None:
-    try:
-        await msg.edit_text(text)
-    except Exception:
-        pass
-
-
-async def _safe_delete(msg: Message) -> None:
-    try:
-        await msg.delete()
-    except Exception:
-        pass
-
-
 def _escape_md(text: str) -> str:
-    """Escape markdown special chars so dynamic content (titles) renders literally.
-
-    Video titles from yt-dlp often contain *, _, ` etc. which break Pyrogram's
-    default markdown parsing. Without escaping, sending the message raises
-    BadRequest and the message never reaches the user.
-    """
+    """Escape markdown special chars so dynamic content (titles) renders literally."""
     if not text:
         return ""
     for ch in ("\\", "*", "_", "`", "[", "]"):
@@ -79,48 +87,62 @@ def _escape_md(text: str) -> str:
     return text
 
 
-# ─── Menu builders (send text menus, store state keyed by message id) ───
+# ─── Safe message helpers (log instead of silently swallowing) ───
 
-async def send_quality_menu(message: Message, url: str, title: str) -> None:
-    """Send a quality-selection menu as a reply; user replies with the number."""
+async def _safe_edit(msg: Message, text: str) -> None:
+    try:
+        await msg.edit_text(text)
+    except Exception as e:
+        _log(f"edit_text fallito (ignorato): {e!r}")
+
+
+async def _safe_delete(msg: Message) -> None:
+    try:
+        await msg.delete()
+    except Exception as e:
+        _log(f"delete fallito (ignorato): {e!r}")
+
+
+# ─── Menu senders ───
+
+async def _send_quality_menu(message: Message, user_id: int, url: str, title: str) -> None:
     menu = await message.reply_text(
         f"🎬 **{_escape_md(title)}**\n\n"
-        f"Scegli la qualità (RISPONDI a questo messaggio col numero):\n"
+        f"Scrivi qui il NUMERO della qualità:\n"
         f"1️⃣ 360p\n"
         f"2️⃣ 720p\n"
         f"3️⃣ 1080p\n"
-        f"🔥 4️⃣ MAX\n\n"
-        f"Esempio: rispondi con `2` per 720p."
+        f"🔥 4️⃣ MAX"
     )
-    _pending_menus[menu.id] = {"type": "quality", "url": url, "title": title}
+    _set_pending(user_id, {"type": "quality", "url": url, "title": title})
+    _log(f"Menu qualità inviato a {user_id} (msg {menu.id})")
 
 
-async def send_playlist_menu(
-    message: Message, videos: list[dict], url: str, page: int = 0, page_size: int = 10,
+async def _send_playlist_menu(
+    message: Message, user_id: int, videos: list[dict], url: str, page: int = 0,
 ) -> None:
-    """Send a numbered playlist menu; user replies with the video number."""
     total = len(videos)
+    page_size = 10
     total_pages = (total + page_size - 1) // page_size or 1
     start = page * page_size
     page_videos = videos[start:start + page_size]
 
-    lines = [f"📋 **Playlist trovata**: {total} video\n"]
-    lines.append(f"_RISPONDI col numero del video da scaricare_ (pagina {page + 1}/{total_pages}):\n")
+    lines = [f"📋 **Playlist**: {total} video (pagina {page + 1}/{total_pages})\n"]
+    lines.append("_Scrivi il NUMERO del video da scaricare:_\n")
     for i, v in enumerate(page_videos):
         idx = start + i + 1
-        vtitle = _escape_md((v.get("title") or "Sconosciuto")[:60])
+        vtitle = _escape_md((v.get("title") or "Sconosciuto")[:55])
         dur = v.get("duration", 0)
         dur_str = f" • {dur // 60}:{dur % 60:02d}" if dur else ""
         lines.append(f"{idx}. {vtitle}{dur_str}")
-
-    lines.append("")
     if total_pages > 1:
-        lines.append("Per cambiare pagina rispondi con `next` o `prev`.")
+        lines.append("\nScrivi `next` o `prev` per cambiare pagina.")
 
     menu = await message.reply_text("\n".join(lines))
-    _pending_menus[menu.id] = {
+    _set_pending(user_id, {
         "type": "playlist", "videos": videos, "url": url, "page": page,
-    }
+    })
+    _log(f"Menu playlist inviato a {user_id} (msg {menu.id}, {total} video)")
 
 
 # ─── Core: download_and_upload ───
@@ -141,6 +163,7 @@ async def download_and_upload(
         await status_msg.reply_text("⏳ C'è già un download in corso. Riprova tra poco.")
         return
     _is_downloading = True
+    _log(f"Download iniziato: {url} [{quality}]")
 
     loop = asyncio.get_running_loop()
 
@@ -175,15 +198,18 @@ async def download_and_upload(
                 filepath = await loop.run_in_executor(
                     None, download_video, url, quality, progress_callback, 1,
                 )
+                _log(f"Download completato: {filepath}")
                 break
             except DownloadError as e:
                 download_error = str(e)
+                _log(f"Tentativo {attempt} fallito: {download_error}")
                 if attempt < max_retries:
                     await asyncio.sleep(2 ** (attempt - 1))
             except Exception as e:
-                download_error = str(e)
+                download_error = repr(e)
+                _log(f"Errore imprevisto download (tentativo {attempt}): {download_error}")
                 cleanup_orphan_files()
-                await _safe_edit(status_msg, f"❌ Download fallito: {download_error}")
+                await _safe_edit(status_msg, f"❌ Download fallito: {e}")
                 return
 
         if filepath is None:
@@ -220,122 +246,98 @@ async def download_and_upload(
                 else:
                     await _safe_edit(
                         status_msg,
-                        f"✅ Download completato ({format_size(file_size_mb)})\n📤 Upload in corso al canale...",
+                        f"✅ Download completato ({format_size(file_size_mb)})\n"
+                        f"📤 Upload in corso al canale...",
                     )
-                await client.send_video(chat_id=channel_id, video=filepath, caption=caption, supports_streaming=True)
+                await client.send_video(
+                    chat_id=channel_id, video=filepath, caption=caption, supports_streaming=True,
+                )
                 upload_success = True
+                _log("Upload completato con successo")
                 break
             except FloodWait as e:
+                _log(f"FloodWait upload: attendo {e.value}s")
                 await asyncio.sleep(e.value)
             except Exception as e:
-                upload_error = str(e)
+                upload_error = repr(e)
+                _log(f"Upload tentativo {attempt} fallito: {upload_error}")
                 if attempt < max_retries:
                     await asyncio.sleep(2 ** (attempt - 1))
 
         # ─── Cleanup ───
         if os.path.exists(filepath):
-            os.remove(filepath)
+            try:
+                os.remove(filepath)
+            except Exception as e:
+                _log(f"Cleanup file fallito: {e!r}")
 
         if upload_success:
             await _safe_edit(status_msg, "✅ Video inviato con successo al canale!")
         else:
             await _safe_edit(
                 status_msg,
-                f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}\nFile eliminato dal disco.",
+                f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}",
             )
 
     finally:
         _is_downloading = False
 
 
-# ─── Message handler (NEW links + reply selections) ───
+# ─── Process a new link ───
 
-async def on_message(
-    client: Client,
-    message: Message,
-    whitelist: Whitelist,
-    channel_id: int,
-    owner_id: int,
-) -> None:
-    """Handle incoming private text messages: replies to menus OR new links."""
-    if not message.from_user:
-        return
-    # Owner can always download, others must be whitelisted
-    if message.from_user.id != owner_id and not whitelist.is_authorized(message.from_user.id):
-        return
-
-    text = (message.text or "").strip()
-
-    # ─── Check if this is a reply to a pending menu ───
-    reply_to_id = message.reply_to_message_id
-    has_url = extract_url(text) is not None
-    if reply_to_id and reply_to_id in _pending_menus and not has_url:
-        await _handle_selection(client, message, text, channel_id)
-        return
-
-    # ─── Otherwise treat as a new link ───
-    url = extract_url(text)
-    if not url:
-        return
-
+async def _process_link(client: Client, message: Message, url: str, channel_id: int) -> None:
+    user_id = message.from_user.id
     status_msg = await message.reply_text("🔍 Analisi del link in corso...")
-
     try:
         loop = asyncio.get_running_loop()
         info = await loop.run_in_executor(None, extract_info, url)
-
         if isinstance(info, list):
             if not info:
-                await _safe_edit(status_msg, "❌ La playlist è vuota o non contiene video accessibili.")
+                await _safe_edit(status_msg, "❌ Playlist vuota o senza video accessibili.")
                 return
             await _safe_delete(status_msg)
-            await send_playlist_menu(message, info, url, page=0)
+            await _send_playlist_menu(message, user_id, info, url, page=0)
         else:
             title = info.get("title", "Sconosciuto")
             await _safe_delete(status_msg)
-            await send_quality_menu(message, url, title)
+            await _send_quality_menu(message, user_id, url, title)
     except ExtractError as e:
-        await _safe_edit(status_msg, f"❌ {str(e)}")
+        _log(f"ExtractError: {e}")
+        await _safe_edit(status_msg, f"❌ {e}")
     except Exception as e:
-        await _safe_edit(status_msg, f"❌ Errore durante l'analisi: {str(e)}")
+        _log(f"Errore analisi link: {e!r}")
+        await _safe_edit(status_msg, f"❌ Errore durante l'analisi: {e}")
 
 
-async def _handle_selection(client: Client, message: Message, text: str, channel_id: int) -> None:
-    """Handle a reply to a pending menu (quality or playlist selection)."""
-    menu_id = message.reply_to_message_id
-    state = _pending_menus.get(menu_id)
-    if not state:
-        return
+# ─── Handle a selection message (plain number, not reply) ───
 
+async def _handle_selection(
+    client: Client, message: Message, user_id: int, text: str, pending: dict, channel_id: int,
+) -> None:
     text_lower = text.lower().strip()
 
-    # ─── Playlist menu reply ───
-    if state["type"] == "playlist":
-        videos = state["videos"]
-        page = state["page"]
+    # ─── Playlist menu ───
+    if pending["type"] == "playlist":
+        videos = pending["videos"]
+        page_size = 10
+        total_pages = (len(videos) + page_size - 1) // page_size or 1
 
-        # Pagination
-        if text_lower in ("next", ">", "avanti", "su"):
-            page_size = 10
-            total_pages = (len(videos) + page_size - 1) // page_size or 1
-            new_page = min(page + 1, total_pages - 1)
-            _pending_menus.pop(menu_id, None)
-            await send_playlist_menu(message, videos, state["url"], page=new_page)
+        if text_lower in ("next", ">", "avanti"):
+            new_page = min(pending["page"] + 1, total_pages - 1)
+            await _send_playlist_menu(message, user_id, videos, pending["url"], page=new_page)
             return
-        if text_lower in ("prev", "<", "indietro", "giù", "giu"):
-            new_page = max(state["page"] - 1, 0)
-            _pending_menus.pop(menu_id, None)
-            await send_playlist_menu(message, videos, state["url"], page=new_page)
+        if text_lower in ("prev", "<", "indietro"):
+            new_page = max(pending["page"] - 1, 0)
+            await _send_playlist_menu(message, user_id, videos, pending["url"], page=new_page)
             return
 
-        # Video number
         try:
-            num = int(text)
+            num = int(text_lower)
         except ValueError:
-            await message.reply_text("❌ Numero non valido. Rispondi col numero del video.")
+            await message.reply_text("❌ Scrivi il NUMERO del video (o `next`/`prev`).")
             return
-        if num < 1 or num > len(videos):
-            await message.reply_text(f"❌ Numero fuori range. Vanno da 1 a {len(videos)}.")
+        if not (1 <= num <= len(videos)):
+            await message.reply_text(f"❌ Numero tra 1 e {len(videos)}.")
             return
 
         video = videos[num - 1]
@@ -344,7 +346,6 @@ async def _handle_selection(client: Client, message: Message, text: str, channel
             await message.reply_text("❌ URL del video non disponibile.")
             return
 
-        # Resolve the single video, then show quality menu
         status_msg = await message.reply_text("🔍 Analisi del video...")
         try:
             loop = asyncio.get_running_loop()
@@ -352,18 +353,17 @@ async def _handle_selection(client: Client, message: Message, text: str, channel
             if isinstance(info, list):
                 info = info[0] if info else {}
             title = info.get("title", "Sconosciuto")
-            _pending_menus.pop(menu_id, None)
             await _safe_delete(status_msg)
-            await send_quality_menu(message, video_url, title)
+            await _send_quality_menu(message, user_id, video_url, title)
         except ExtractError as e:
-            await _safe_edit(status_msg, f"❌ {str(e)}")
+            await _safe_edit(status_msg, f"❌ {e}")
         except Exception as e:
-            await _safe_edit(status_msg, f"❌ Errore: {str(e)}")
+            _log(f"Errore analisi video playlist: {e!r}")
+            await _safe_edit(status_msg, f"❌ Errore: {e}")
         return
 
-    # ─── Quality menu reply ───
-    if state["type"] == "quality":
-        # Accept "1".."4" or direct "360"/"720"/"1080"/"max"
+    # ─── Quality menu ───
+    if pending["type"] == "quality":
         choice = QUALITY_CHOICES.get(text_lower)
         if text_lower in ("360", "720", "1080", "max"):
             label = "MAX" if text_lower == "max" else f"{text_lower}p"
@@ -371,25 +371,56 @@ async def _handle_selection(client: Client, message: Message, text: str, channel
         elif choice:
             label, quality = choice
         else:
-            await message.reply_text(
-                "❌ Scelta non valida. Rispondi con `1`, `2`, `3` o `4` "
-                "(oppure `360`, `720`, `1080`, `max`)."
-            )
+            await message.reply_text("❌ Scrivi `1`, `2`, `3` o `4`.")
             return
 
-        url = state["url"]
-        title = state["title"]
-        _pending_menus.pop(menu_id, None)
-
+        url = pending["url"]
+        title = pending["title"]
+        _clear_pending(user_id)
+        _log(f"Qualità scelta da {user_id}: {quality}")
         status_msg = await message.reply_text(f"⏳ Avvio download in qualità **{label}**...")
         await download_and_upload(client, status_msg, url, quality, title, channel_id)
         return
 
 
+# ─── Message handler ───
+
+async def on_message(
+    client: Client,
+    message: Message,
+    whitelist: Whitelist,
+    channel_id: int,
+    owner_id: int,
+) -> None:
+    """Dispatch: new links start the flow; plain numbers select from pending menu."""
+    user = message.from_user
+    if not user:
+        return
+    if user.id != owner_id and not whitelist.is_authorized(user.id):
+        return
+
+    text = (message.text or "").strip()
+    url = extract_url(text)
+
+    if url:
+        # New link — clear any pending state and process
+        _clear_pending(user.id)
+        _log(f"Nuovo link da {user.id}: {url}")
+        await _process_link(client, message, url, channel_id)
+        return
+
+    # Not a URL — is there a pending menu for this user?
+    pending = _get_pending(user.id)
+    if pending:
+        await _handle_selection(client, message, user.id, text, pending, channel_id)
+        return
+
+    _log(f"Messaggio senza menu pending ignorato da {user.id}: {text[:40]!r}")
+
+
 # ─── Admin commands ───
 
 async def cmd_adduser(client: Client, message: Message, whitelist: Whitelist, owner_id: int) -> None:
-    """Add a user to the whitelist. Usage: /adduser @username or /adduser 123456789"""
     if not message.from_user or message.from_user.id != owner_id:
         return
     parts = (message.text or "").split()
@@ -397,26 +428,22 @@ async def cmd_adduser(client: Client, message: Message, whitelist: Whitelist, ow
         await message.reply_text("❌ Uso: `/adduser @username` o `/adduser 123456789`")
         return
     target = parts[1]
-
     if target.startswith("@"):
         try:
             user = await client.get_users(target)
             user_id = user.id
             display_name = f"@{user.username}" if user.username else user.first_name
-        except Exception:
-            await message.reply_text(
-                f"❌ Impossibile trovare l'utente `{target}`. "
-                f"Assicurati che abbia mai interagito con questo account."
-            )
+        except Exception as e:
+            _log(f"get_users fallito per {target}: {e!r}")
+            await message.reply_text(f"❌ Impossibile trovare `{target}`.")
             return
     else:
         try:
             user_id = int(target)
             display_name = str(user_id)
         except ValueError:
-            await message.reply_text("❌ Formato non valido. Usa `/adduser @username` o `/adduser 123456789`")
+            await message.reply_text("❌ Formato non valido.")
             return
-
     if whitelist.is_authorized(user_id):
         await message.reply_text(f"ℹ️ {display_name} è già autorizzato.")
         return
@@ -425,7 +452,6 @@ async def cmd_adduser(client: Client, message: Message, whitelist: Whitelist, ow
 
 
 async def cmd_removeuser(client: Client, message: Message, whitelist: Whitelist, owner_id: int) -> None:
-    """Remove a user from the whitelist."""
     if not message.from_user or message.from_user.id != owner_id:
         return
     parts = (message.text or "").split()
@@ -433,16 +459,14 @@ async def cmd_removeuser(client: Client, message: Message, whitelist: Whitelist,
         await message.reply_text("❌ Uso: `/removeuser @username` o `/removeuser 123456789`")
         return
     target = parts[1]
-
     if target.startswith("@"):
-        all_users = whitelist.get_all()
         user_id = None
-        for uid, udata in all_users.items():
+        for uid, udata in whitelist.get_all().items():
             if udata.get("username", "").lower() == target.lower():
                 user_id = uid
                 break
         if user_id is None:
-            await message.reply_text(f"❌ {target} non trovato nella whitelist.")
+            await message.reply_text(f"❌ {target} non trovato.")
             return
     else:
         try:
@@ -450,15 +474,13 @@ async def cmd_removeuser(client: Client, message: Message, whitelist: Whitelist,
         except ValueError:
             await message.reply_text("❌ Formato non valido.")
             return
-
     if whitelist.remove(user_id):
-        await message.reply_text(f"✅ {target} rimosso dalla whitelist.")
+        await message.reply_text(f"✅ {target} rimosso.")
     else:
         await message.reply_text(f"❌ {target} non era nella whitelist.")
 
 
 async def cmd_users(client: Client, message: Message, whitelist: Whitelist, owner_id: int) -> None:
-    """List all whitelisted users."""
     if not message.from_user or message.from_user.id != owner_id:
         return
     users = whitelist.get_all()
@@ -470,31 +492,25 @@ async def cmd_users(client: Client, message: Message, whitelist: Whitelist, owne
         username = udata.get("username", str(uid))
         added_at = udata.get("added_at", "?")[:10]
         lines.append(f"• `{uid}` — {username} (dal {added_at})")
-    text = f"**📋 Utenti autorizzati ({len(users)}):**\n" + "\n".join(lines)
-    await message.reply_text(text)
+    await message.reply_text(f"**📋 Autorizzati ({len(users)}):**\n" + "\n".join(lines))
 
 
 async def cmd_channel(client: Client, message: Message, channel_id: int) -> None:
-    """Show the current target channel."""
     try:
         chat = await client.get_chat(channel_id)
         name = chat.title or str(channel_id)
-        await message.reply_text(f"📺 Canale di destinazione: **{name}** (`{channel_id}`)")
+        await message.reply_text(f"📺 Canale: **{name}** (`{channel_id}`)")
     except Exception:
-        await message.reply_text(f"📺 Canale di destinazione: `{channel_id}`")
+        await message.reply_text(f"📺 Canale: `{channel_id}`")
 
 
 async def cmd_status(client: Client, message: Message):
-    await message.reply_text(
-        f"📊 Download in corso: {'sì' if _is_downloading else 'no'}"
-    )
+    await message.reply_text(f"📊 Download in corso: {'sì' if _is_downloading else 'no'}")
 
 
 # ─── Handler registration ───
 
 def register_handlers(app: Client, whitelist: Whitelist, channel_id: int, owner_id: int) -> None:
-    """Register the message handler on the Pyrogram client."""
-
     @app.on_message(filters.text & filters.private)
     async def _on_message(client, message):
         if message.from_user and message.from_user.id == owner_id:

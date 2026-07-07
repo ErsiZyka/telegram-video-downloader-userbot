@@ -12,6 +12,14 @@ Usage:
 import os
 import sys
 import asyncio
+
+# Force UTF-8 on Windows console to avoid UnicodeEncodeError on titles/filenames
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 from dotenv import load_dotenv
 
 from pyrogram import idle
