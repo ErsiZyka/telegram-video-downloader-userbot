@@ -498,5 +498,9 @@ It is password-protected and intended to run inside a **private network** (LAN o
 pip install fastapi "uvicorn[standard]" jinja2
 # create panel.env with: PANEL_PASSWORD=your_password
 sudo cp panel.service /etc/systemd/system/ && sudo systemctl enable --now panel
+# sudo NOPASSWD is REQUIRED for the panel's control buttons (bot/docker/reboot) and for
+# sudo commands in the shell box:
+echo "$(whoami) ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/90-panel-$(whoami)
+sudo chmod 440 /etc/sudoers.d/90-panel-$(whoami)
 # open http://<server>:8080  (over Tailscale: http://<hostname>:8080 from any device)
 ```
