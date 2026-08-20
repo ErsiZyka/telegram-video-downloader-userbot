@@ -15,13 +15,14 @@ from telethon.errors import FloodWaitError
 from telethon.tl.types import DocumentAttributeVideo
 
 from bot.whitelist import Whitelist
-from bot.extractors import get_extractor
+from bot.extractors import get_extractor, get_universal_fallback
 from bot.downloader import (
     extract_info,
     download_video,
     probe_video_metadata,
     DownloadError,
     ExtractError,
+    VideoUnavailableError,
     format_size,
     format_speed,
     format_eta,
@@ -47,6 +48,7 @@ _current_item: dict | None = None
 _queue_worker_task: asyncio.Task | None = None
 _resume_event: asyncio.Event | None = None
 _resume_decision: str | None = None  # "yes" | "no"
+_extract_lock = asyncio.Lock()
 
 QUALITY_CHOICES = {
     "1": ("360p", "360"),
@@ -694,10 +696,12 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
                 "url": url, "title": title})
             return
 
-    status_msg = await _safe_reply(event, "🔍 Analisi del link in corso...")
+    status_msg = await _safe_reply(event, "🔍 Analisi del link in attesa...")
     try:
-        loop = asyncio.get_running_loop()
-        info = await loop.run_in_executor(None, extract_info, url)
+        async with _extract_lock:
+            await _safe_edit(status_msg, "🔍 Analisi del link in corso...")
+            loop = asyncio.get_running_loop()
+            info = await loop.run_in_executor(None, extract_info, url)
         if isinstance(info, list):
             if not info:
                 await _safe_edit(status_msg, "❌ Playlist vuota.")
@@ -708,8 +712,44 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
             title = info.get("title", "Sconosciuto")
             await _safe_delete(status_msg)
             await _send_quality_menu(event, user_id, url, title)
+    except VideoUnavailableError as e:
+        # yt-dlp segnala il contenuto come non disponibile/paywall. Se il sito
+        # è nella lista universale, proviamo comunque col browser normale
+        # (accesso standard, nessun bypass): se la sorgente serve davvero il
+        # video a un browser anonimo, la risorsa è disponibile -> si scarica;
+        # altrimenti messaggio chiaro e stop.
+        _log(f"VideoUnavailable: {e}")
+        fallback = get_universal_fallback(url)
+        if fallback is not None:
+            _log("yt-dlp segnala non disponibile: verifico comunque col browser (accesso standard)")
+            await _safe_edit(status_msg, "🌐 Verifica disponibilità via browser...")
+            try:
+                finfo = await fallback.extract(url)
+                _log("Risorsa servita al browser: %s", finfo.url[:80])
+                await _safe_delete(status_msg)
+                await _send_quality_menu(event, user_id, finfo.url, finfo.title, finfo.headers)
+            except Exception:
+                _log("Fallback universale: risorsa non servita dal sito")
+                await _safe_edit(status_msg, f"🔒 {e}")
+            return
+        await _safe_edit(status_msg, f"🔒 {e}")
     except ExtractError as e:
         _log(f"ExtractError: {e}")
+        # yt-dlp non ce l'ha fatta per motivi TECNICI: prova il fallback
+        # universale Playwright (siti free-tube con extractor rotto/obsoleto).
+        fallback = get_universal_fallback(url)
+        if fallback is not None:
+            _log("yt-dlp fallito (%s): provo extractor universale", str(e)[:80])
+            await _safe_edit(status_msg, "🌐 Estrazione via browser (fallback)...")
+            try:
+                finfo = await fallback.extract(url)
+                _log("Fallback universale ok: %s", finfo.url[:80])
+                await _safe_delete(status_msg)
+                await _send_quality_menu(event, user_id, finfo.url, finfo.title, finfo.headers)
+            except Exception as e2:
+                _log(f"Fallback universale fallito: {e2!r}")
+                await _safe_edit(status_msg, f"❌ {e}")
+            return
         await _safe_edit(status_msg, f"❌ {e}")
     except Exception as e:
         _log(f"Errore analisi: {e!r}")

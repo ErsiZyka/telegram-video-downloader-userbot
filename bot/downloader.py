@@ -14,8 +14,23 @@ class DownloadError(Exception):
     """Raised when a download fails after all retries."""
 
 
+class _SlowStartError(Exception):
+    """Internal: raised from the progress hook when the download is
+    suspiciously slow early on (CDN throttling on the first connection).
+    The retry loop catches it and retries with more concurrent fragments."""
+
+
 class ExtractError(Exception):
     """Raised when info extraction fails."""
+
+
+class VideoUnavailableError(ExtractError):
+    """Raised when the video exists but is NOT freely available from the
+    source (members-only, private, paywalled, geo-blocked, etc.).
+
+    The bot shows a clear message and does NOT retry with the universal
+    fallback: the content is protected, not technically broken. We only
+    download what the source serves freely."""
 
 
 def format_size(size_mb: float) -> str:
@@ -52,8 +67,13 @@ def format_eta(seconds: int | None | float) -> str:
 import yt_dlp
 import os
 import re
+import sys
 import subprocess
 import json
+
+# Slow-start detector tuning (env-overridable)
+SLOW_START_GRACE_S = float(os.getenv("SLOW_START_GRACE", "8"))             # seconds to observe
+SLOW_START_MIN_BPS = float(os.getenv("SLOW_START_MIN_KB", "250")) * 1024   # bytes/s threshold
 
 from bot.logging_config import get_logger
 
@@ -84,15 +104,167 @@ def _normalize_url(url: str) -> str:
 
 
 def _get_ydl_cookie_opts() -> dict:
-    """Build cookie-related yt-dlp options from COOKIES_FROM_BROWSER env var.
+    """Build cookie-related yt-dlp options from environment variables.
 
-    Set COOKIES_FROM_BROWSER in .env to one of: chrome, edge, firefox, brave,
-    chromium, opera, safari, vivaldi, whale.
+    Supports:
+      - COOKIES_FILE: path to a cookies.txt file
+      - COOKIES_FROM_BROWSER: browser name (e.g. 'chrome', 'firefox')
     """
+    opts = {}
+    
+    # 1. First priority: cookies file (very reliable on headless servers)
+    cookies_file = os.getenv("COOKIES_FILE", "").strip()
+    if cookies_file:
+        if os.path.exists(cookies_file):
+            opts["cookiefile"] = cookies_file
+            _log.info("Caricamento cookie dal file: %s", cookies_file)
+            return opts
+        else:
+            _log.warning("Il file dei cookie specificato non esiste: %s", cookies_file)
+
+    # 2. Second priority: browser cookies
     browser = os.getenv("COOKIES_FROM_BROWSER", "").strip().lower()
-    if not browser:
-        return {}
-    return {"cookiesfrombrowser": (browser,)}
+    if browser:
+        _log.info("Tentativo di estrazione cookie dal browser: %s", browser)
+        opts["cookiesfrombrowser"] = (browser,)
+        
+    return opts
+
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+_UA_FALLBACKS = [
+    _BROWSER_UA,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0",
+]
+
+
+def _get_browser_headers(ua: str = _BROWSER_UA) -> dict:
+    """Realistic browser headers for sites that block bare HTTP requests."""
+    return {
+        "User-Agent": ua,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
+    }
+
+
+def _is_blocked_error(msg: str) -> bool:
+    """True if a yt-dlp error looks like a bot/403 block worth retrying with browser headers."""
+    lowered = (msg or "").lower()
+    return any(k in lowered for k in (
+        "403", "forbidden", "http error 400", "bad request",
+        "cloudflare", "captcha", "access denied", "blocked",
+    ))
+
+
+def _extract_with_retry(url: str, ydl_opts: dict, headers_used: dict | None = None):
+    """Run yt-dlp extract_info; retry once with browser headers on 403/block errors."""
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    except yt_dlp.utils.DownloadError as e:
+        msg = str(e)
+        if _is_blocked_error(msg) and not (headers_used or {}).get("User-Agent"):
+            _log.warning("Possibile blocco bot (%s): riprovo con header browser", msg[:90])
+            retry_opts = dict(ydl_opts)
+            retry_opts["http_headers"] = _get_browser_headers()
+            with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+        raise
+
+
+def _get_network_opts() -> dict:
+    """Build network options (IPv4, impersonation, extractor-args) to prevent 403 blocks."""
+    opts = {}
+    
+    # Force IPv4 by default (helps bypass YouTube IPv6 403 blocks)
+    force_ipv4_env = os.getenv("FORCE_IPV4", "true").strip().lower()
+    if force_ipv4_env in ("true", "1", "yes"):
+        opts["force_ipv4"] = True
+        _log.debug("Forzo l'utilizzo di IPv4 per le connessioni di yt-dlp")
+
+    # Impersonate a real browser TLS fingerprint via curl_cffi. Many CDNs
+    # (Cloudflare, Akamai...) block plain python-requests TLS signatures with
+    # HTTP 403; impersonating Chrome avoids that without per-site hacks.
+    impersonate = os.getenv("IMPERSONATE", "chrome").strip().lower()
+    if impersonate not in ("", "none", "off", "false", "0"):
+        try:
+            import curl_cffi  # noqa: F401
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            opts["impersonate"] = ImpersonateTarget.from_str(impersonate)
+            _log.info("Impersonamento TLS attivo: %s", impersonate)
+        except ImportError:
+            _log.warning("curl_cffi non disponibile: impersonamento disattivato")
+        except Exception as e:
+            _log.warning("Impersonamento non disponibile (%s): disattivato", repr(e))
+
+    # Add Youtube extractor arguments to bypass restricted clients
+    opts["extractor_args"] = {
+        "youtube": {
+            "player_client": "web,mweb",
+        }
+    }
+    
+    return opts
+
+
+def _get_downloader_opts() -> dict:
+    """Build downloader-related options (like aria2c and concurrent fragments)."""
+    opts = {}
+    
+    # 1. Concurrent fragment downloads (native HLS/DASH multi-threading)
+    concurrent_fragments = os.getenv("CONCURRENT_FRAGMENTS", "16").strip()
+    try:
+        opts["concurrent_fragment_downloads"] = int(concurrent_fragments)
+        _log.info("Impostato concurrent_fragment_downloads a %d", opts["concurrent_fragment_downloads"])
+    except ValueError:
+        opts["concurrent_fragment_downloads"] = 16
+        _log.warning("Valore CONCURRENT_FRAGMENTS non valido, uso il default: 16")
+
+    # 2. HTTP chunk size for the native downloader (speeds up single-file CDN pulls)
+    chunk = os.getenv("HTTP_CHUNK_SIZE", "").strip()
+    if chunk:
+        opts["http_chunk_size"] = chunk
+        _log.info("http_chunk_size impostato a %s", chunk)
+
+    # 3. External downloader (e.g. aria2c for direct HTTP/FTP files)
+    use_aria2 = os.getenv("USE_ARIA2", "true").strip().lower() in ("true", "1", "yes")
+    if use_aria2:
+        import shutil
+        if shutil.which("aria2c"):
+            # Map protocols: use aria2c by default but fall back to native for HLS/DASH
+            opts["external_downloader"] = {
+                "default": "aria2c",
+                "m3u8": "native",
+                "dash": "native",
+            }
+            opts["external_downloader_args"] = {
+                "aria2c": [
+                    "-c",
+                    "-j", "16",
+                    "-x", "16",
+                    "-s", "16",
+                    "-k", "1M",
+                    "--file-allocation=none",
+                    "--console-log-level=warn",
+                    "--summary-interval=0"
+                ]
+            }
+            _log.info("Abilitato downloader esterno aria2c per download direct HTTP")
+        else:
+            _log.debug("aria2c non trovato nel sistema, uso il downloader nativo")
+            
+    return opts
 
 
 def extract_info(url: str, extra_headers: dict | None = None) -> dict | list[dict]:
@@ -115,13 +287,13 @@ def extract_info(url: str, extra_headers: dict | None = None) -> dict | list[dic
         "skip_download": True,
     }
     ydl_opts.update(_get_ydl_cookie_opts())
+    ydl_opts.update(_get_network_opts())
     if extra_headers:
         ydl_opts["http_headers"] = dict(extra_headers)
     url = _normalize_url(url)
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        info = _extract_with_retry(url, ydl_opts, extra_headers)
 
         if info is None:
             raise ExtractError("Nessuna informazione trovata per questo link.")
@@ -157,10 +329,19 @@ def extract_info(url: str, extra_headers: dict | None = None) -> dict | list[dic
 
     except yt_dlp.utils.DownloadError as e:
         msg = str(e)
-        if "Private video" in msg or "Video unavailable" in msg:
-            raise ExtractError("Video non accessibile (privato o non disponibile).")
-        if "This video is not available" in msg:
-            raise ExtractError("Video non disponibile (potrebbe essere geo-bloccato).")
+        lowered = msg.lower()
+        # Content that is not freely available -> clear message, no fallback.
+        if any(k in lowered for k in (
+                "members-only", "channel's members", "members on level",
+                "join this channel", "premium", "purchase", "paywall",
+                "sign in", "login", "logged in", "account", "subscription")):
+            raise VideoUnavailableError(
+                "Video riservato a membri/abbonati del canale (contenuto a pagamento): "
+                "non è liberamente disponibile dalla sorgente, quindi non lo scarico.")
+        if "private video" in lowered or "video unavailable" in lowered:
+            raise VideoUnavailableError("Video non accessibile (privato o non disponibile).")
+        if "this video is not available" in lowered:
+            raise VideoUnavailableError("Video non disponibile (potrebbe essere geo-bloccato).")
         raise ExtractError(f"Link non supportato o video non disponibile: {msg}")
     except Exception as e:
         raise ExtractError(f"Errore durante l'estrazione: {str(e)}")
@@ -208,7 +389,7 @@ def check_dependencies() -> tuple[bool, str]:
     """
     try:
         result = subprocess.run(
-            ["yt-dlp", "--version"],
+            [sys.executable, "-m", "yt_dlp", "--version"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -264,13 +445,32 @@ def download_video(
     output_template = os.path.join("downloads", "%(title).100s.%(ext)s")
 
     def _make_progress_hook():
-        """Create a yt-dlp progress hook that calls our callback."""
+        """Create a yt-dlp progress hook that calls our callback.
+
+        Also implements the slow-start detector: if after a grace period the
+        download is clearly throttled (single-digit KB/s), raise _SlowStartError
+        so the retry loop can restart with more concurrent connections.
+        """
+        slow_started = None
 
         def hook(d: dict) -> None:
+            nonlocal slow_started
             if d["status"] == "downloading":
                 downloaded = d.get("downloaded_bytes", 0) or 0
                 total = d.get("total_bytes", 0) or d.get("total_bytes_estimate", 0) or 0
                 speed = d.get("speed", 0) or 0
+
+                # Slow-start detector: first 8s of a download. If total data
+                # moved stays under 250 KB/s, the CDN is throttling the
+                # connection -> abort and retry with more fragments.
+                now = time.monotonic()
+                if slow_started is None:
+                    slow_started = now
+                elapsed = now - slow_started
+                if elapsed >= SLOW_START_GRACE_S and downloaded < SLOW_START_MIN_BPS * elapsed:
+                    rate = downloaded / elapsed / 1024 if elapsed > 0 else 0
+                    _log.warning("Partenza lenta: %.0f KB/s dopo %.0fs -> riavvio con più connessioni", rate, elapsed)
+                    raise _SlowStartError("slow start")
 
                 downloaded_mb = downloaded / (1024 * 1024)
                 total_mb = total / (1024 * 1024) if total else 0
@@ -293,6 +493,8 @@ def download_video(
         "fragment_retries": 5,
     }
     ydl_opts.update(_get_ydl_cookie_opts())
+    ydl_opts.update(_get_network_opts())
+    ydl_opts.update(_get_downloader_opts())
     if extra_headers:
         ydl_opts["http_headers"] = dict(extra_headers)
     url = _normalize_url(url)
@@ -304,7 +506,6 @@ def download_video(
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(info)
-
                 # After merge, the extension might be .mp4 or .mkv
                 if not os.path.exists(filename):
                     base = os.path.splitext(filename)[0]
@@ -316,6 +517,15 @@ def download_video(
                 _log.info("Download completato: %s", filename)
                 return filename
 
+        except _SlowStartError:
+            last_error = "slow start"
+            # Boost parallelism: each slow start doubles the concurrent
+            # fragments (up to 64) so throttled per-connection CDNs still
+            # aggregate decent throughput.
+            cur = int(ydl_opts.get("concurrent_fragment_downloads", 16) or 16)
+            boosted = min(cur * 2, 64)
+            ydl_opts["concurrent_fragment_downloads"] = boosted
+            _log.info("Riavvio con %d fragment concorrenti (era %d)", boosted, cur)
         except yt_dlp.utils.DownloadError as e:
             last_error = str(e)
             # Some streaming CDNs offer discrete quality tiers (480/720/1080)
@@ -342,6 +552,11 @@ def download_video(
                     last_error = str(e2)
         except Exception as e:
             last_error = str(e)
+
+        # Bot/403 block? Retry with realistic browser headers (helps many CDNs).
+        if _is_blocked_error(last_error) and not (extra_headers or {}).get("User-Agent"):
+            _log.warning("Possibile blocco bot (%s): riprovo con header browser", last_error[:90])
+            ydl_opts["http_headers"] = _get_browser_headers()
 
         if attempt < max_retries:
             wait = 2 ** (attempt - 1)  # 1s, 2s, 4s

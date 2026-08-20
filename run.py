@@ -6,6 +6,9 @@ import sys
 import asyncio
 import logging
 
+if os.name == "posix":
+    os.environ["OPENSSL_CONF"] = "/dev/null"
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")

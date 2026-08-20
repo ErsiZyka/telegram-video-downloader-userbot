@@ -24,14 +24,35 @@ except ImportError:
     _PLAYWRIGHT_AVAILABLE = False
 
 # Order matters: more specific first.
-_EXTRACTORS: list[type[BaseExtractor]] = []
+from bot.extractors.hentaiworld import HentaiWorldExtractor
+from bot.extractors.tube8 import Tube8Extractor
+from bot.extractors.beeg import BeegExtractor
+
+_EXTRACTORS: list[type[BaseExtractor]] = [
+    HentaiWorldExtractor,
+    Tube8Extractor,
+    BeegExtractor,
+]
+
 if _PLAYWRIGHT_AVAILABLE:
     from bot.extractors.altadefinizione import AltaDefinizioneExtractor
     from bot.extractors.streamingcommunity import StreamingCommunityExtractor
-    _EXTRACTORS = [
+    _EXTRACTORS.extend([
         AltaDefinizioneExtractor,
         StreamingCommunityExtractor,
-    ]
+    ])
+
+
+def get_universal_fallback(url: str) -> BaseExtractor | None:
+    """Fallback browser-based extractor for free tube sites whose yt-dlp
+    extractor is broken/outdated. Used only AFTER yt-dlp fails, so sites with
+    a working yt-dlp extractor never pay the browser cost."""
+    if not _PLAYWRIGHT_AVAILABLE:
+        return None
+    from bot.extractors.universal import UniversalPlaywrightExtractor
+    if UniversalPlaywrightExtractor.can_handle(url):
+        return UniversalPlaywrightExtractor()
+    return None
 
 
 def is_playwright_ready() -> bool:
@@ -72,21 +93,20 @@ def is_playwright_ready() -> bool:
 def get_extractor(url: str) -> BaseExtractor | None:
     """Return an extractor instance that can handle `url`, or None.
 
-    Returns None (and logs a hint) if Playwright isn't available, so the bot
-    falls back to yt-dlp. This keeps the bot usable on phones/limited envs.
+    If the extractor requires Playwright and it's not installed, returns None
+    and logs a warning.
     """
-    if not _PLAYWRIGHT_AVAILABLE:
-        _log.warning(
-            "Playwright non installato: i siti streaming italiani non saranno "
-            "supportati (yt-dlp diretto rimane attivo). Installa con: "
-            "pip install playwright && playwright install chromium"
-        )
-        return None
     for cls in _EXTRACTORS:
         if cls.can_handle(url):
+            if issubclass(cls, PlaywrightVideoExtractor) and not _PLAYWRIGHT_AVAILABLE:
+                _log.warning(
+                    f"L'estrattore per {cls.__name__} richiede Playwright, "
+                    "che non è installato. Esegui: pip install playwright && playwright install chromium"
+                )
+                return None
             return cls()
     return None
 
 
 __all__ = ["BaseExtractor", "PlaywrightVideoExtractor", "VideoInfo",
-           "get_extractor", "is_playwright_ready"]
+           "get_extractor", "get_universal_fallback", "is_playwright_ready"]

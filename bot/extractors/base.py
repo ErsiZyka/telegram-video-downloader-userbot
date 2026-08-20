@@ -94,10 +94,11 @@ class PlaywrightVideoExtractor(BaseExtractor):
 
     async def extract(self, url: str) -> VideoInfo:
         video_url: str | None = None
+        video_headers: dict = {}
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
         async def _on_response(response):
-            nonlocal video_url
+            nonlocal video_url, video_headers
             if video_url is not None or future.done():
                 return
             try:
@@ -107,6 +108,17 @@ class PlaywrightVideoExtractor(BaseExtractor):
                 return
             if _is_stream_response(u, ct):
                 video_url = u
+                # Capture the request headers the browser used for this stream:
+                # some CDNs (beeg/video.beeg.com) validate the exact header set
+                # and return 403 otherwise. Reproduce them for yt-dlp/ffmpeg.
+                try:
+                    req_headers = response.request.headers
+                    video_headers = {
+                        k: v for k, v in req_headers.items()
+                        if k.lower() not in ("host", "content-length", "cookie")
+                    }
+                except Exception:
+                    video_headers = dict(_STREAM_HEADERS)
                 _log.info("Stream intercettato: %s", u[:100])
                 if not future.done():
                     future.set_result(u)
@@ -171,7 +183,8 @@ class PlaywrightVideoExtractor(BaseExtractor):
         if video_url is None:
             raise RuntimeError("Nessuno stream video trovato entro il timeout.")
         _log.info("Stream trovato: %s", video_url[:100])
-        return VideoInfo(url=video_url, title=title, headers=dict(_STREAM_HEADERS))
+        return VideoInfo(url=video_url, title=title,
+                         headers=video_headers or dict(_STREAM_HEADERS))
 
     async def _click_play(self, page) -> None:
         """Find the player (possibly inside an iframe) and click its play button

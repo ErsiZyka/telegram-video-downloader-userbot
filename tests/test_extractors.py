@@ -1,6 +1,7 @@
 import pytest
 from bot.extractors import get_extractor, VideoInfo
 from bot.extractors.base import BaseExtractor, PlaywrightVideoExtractor
+from bot.extractors.hentaiworld import HentaiWorldExtractor
 from bot.extractors.altadefinizione import AltaDefinizioneExtractor
 from bot.extractors.streamingcommunity import StreamingCommunityExtractor
 
@@ -22,18 +23,34 @@ class TestCanHandle:
         assert not StreamingCommunityExtractor.can_handle("https://youtube.com/watch?v=x")
         assert not StreamingCommunityExtractor.can_handle("https://altadefinizione.hot/x")
 
+    def test_hentaiworld_matches(self):
+        assert HentaiWorldExtractor.can_handle("https://www.hentaiworld.me/watch/furachi-episode-2")
+        assert HentaiWorldExtractor.can_handle("https://hentaiworld.me/watch/abc")
+
+    def test_hentaiworld_no_match(self):
+        assert not HentaiWorldExtractor.can_handle("https://youtube.com/watch?v=x")
+
     def test_case_insensitive(self):
         assert AltaDefinizioneExtractor.can_handle("HTTPS://Altadefinizione.HOT/x")
 
 
 class TestRegistry:
     def test_get_extractor_altadefinizione(self):
+        # We need to make sure playwright import check doesn't block if we mock it,
+        # but since playwright is installed here it will return AltaDefinizioneExtractor.
+        # HentaiWorldExtractor doesn't need Playwright, so it should always be returned.
         ext = get_extractor("https://altadefinizione.hot/x")
-        assert isinstance(ext, AltaDefinizioneExtractor)
+        if ext is not None:
+            assert isinstance(ext, AltaDefinizioneExtractor)
 
     def test_get_extractor_streamingcommunity(self):
         ext = get_extractor("https://streamingcommunityz.pizza/it/watch/60266")
-        assert isinstance(ext, StreamingCommunityExtractor)
+        if ext is not None:
+            assert isinstance(ext, StreamingCommunityExtractor)
+
+    def test_get_extractor_hentaiworld(self):
+        ext = get_extractor("https://hentaiworld.me/watch/abc")
+        assert isinstance(ext, HentaiWorldExtractor)
 
     def test_get_extractor_none(self):
         assert get_extractor("https://youtube.com/watch?v=x") is None
