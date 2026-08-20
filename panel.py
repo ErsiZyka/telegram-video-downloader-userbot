@@ -104,8 +104,9 @@ def _docker() -> list[dict]:
     return out
 
 
-_wire_conns: set[WebSocket] = set()
-_log_buffer: deque[str] = deque(maxlen=400)
+_wire_conns: dict[WebSocket, int] = {}  # ws -> indice ultima riga inviata
+_log_buffer: deque[str] = deque(maxlen=400)  # ring buffer persistente
+event_log_written = 0  # contatore monotono di righe emesse
 
 
 def _tail_log(path: str, n: int = 400) -> str:
@@ -118,8 +119,11 @@ def _tail_log(path: str, n: int = 400) -> str:
 
 @app.on_event("startup")
 async def _startup():
+    global event_log_written
+
     async def _log_feeder():
         """Poll log files and push new lines to connected WebSockets."""
+        global event_log_written
         cursors = {p: len(_tail_log(p).encode()) for p in LOG_FILES if os.path.exists(p)}
         while True:
             await asyncio.sleep(1.5)
@@ -133,16 +137,22 @@ async def _startup():
                     cursors[path] = len(data)
                     for line in chunk.decode(errors="replace").splitlines():
                         _log_buffer.append(f"[{os.path.basename(path)}] {line}")
+                        event_log_written += 1
                 elif len(data) < cursors[path]:
                     cursors[path] = 0
-            if _wire_conns and _log_buffer:
-                batch = "\n".join(_log_buffer)
-                _log_buffer.clear()
-                for ws in list(_wire_conns):
+            # push solo le righe nuove a ogni client connesso
+            if _wire_conns:
+                for ws, sent in list(_wire_conns.items()):
+                    pending = event_log_written - sent
+                    if pending <= 0:
+                        continue
+                    # prendi le ultime `pending` righe dal buffer
+                    lines = list(_log_buffer)[-pending:]
                     try:
-                        await ws.send_text(batch)
+                        await ws.send_text("\n".join(lines))
+                        _wire_conns[ws] = event_log_written
                     except Exception:
-                        _wire_conns.discard(ws)
+                        _wire_conns.pop(ws, None)
 
     asyncio.create_task(_log_feeder())
 
@@ -162,6 +172,7 @@ async def login(request: Request):
         resp = JSONResponse({"ok": True})
         resp.set_cookie("panel_auth", token, httponly=True, samesite="strict")
         return resp
+    await asyncio.sleep(0.8)  # rallenta i tentativi di brute-force
     return JSONResponse({"ok": False}, status_code=401)
 
 
@@ -215,7 +226,8 @@ async def kill_proc(request: Request):
     pid = str(body.get("pid", "")).strip()
     if not pid.isdigit():
         return {"ok": False, "err": "invalid pid"}
-    return _run(["kill", "-TERM", pid], timeout=10)
+    force = bool(body.get("force"))
+    return _run(["kill", "-KILL" if force else "-TERM", pid], timeout=10)
 
 
 @app.post("/api/shell")
@@ -248,17 +260,18 @@ async def reboot(request: Request):
 @app.websocket("/ws/logs")
 async def ws_logs(websocket: WebSocket):
     await websocket.accept()
-    _wire_conns.add(websocket)
+    # il nuovo client riceve subito la storia recente, poi solo le righe nuove
+    recent = list(_log_buffer)[-120:]
+    if recent:
+        await websocket.send_text("\n".join(recent))
+    _wire_conns[websocket] = event_log_written
     try:
-        # send recent buffer first
-        if _log_buffer:
-            await websocket.send_text("\n".join(_log_buffer))
         while True:
             await websocket.receive_text()  # keepalive/ping
     except WebSocketDisconnect:
-        _wire_conns.discard(websocket)
+        _wire_conns.pop(websocket, None)
     except Exception:
-        _wire_conns.discard(websocket)
+        _wire_conns.pop(websocket, None)
 
 
 if __name__ == "__main__":

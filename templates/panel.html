@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%234f8cff'/><text x='50' y='68' font-size='52' text-anchor='middle'>🖥️</text></svg>">
 <title>ServerPanel</title>
 <style>
   :root {
@@ -302,14 +303,21 @@ function toast(msg, kind='') {
 
 async function api(path, opts={}) {
   const r = await fetch(path, {headers:{'Content-Type':'application/json'}, ...opts});
-  if (r.status===401) { location.reload(); return null; }
+  if (r.status===401) {
+    // sessione scaduta: torna al login senza loop di reload
+    const main = document.getElementById('main');
+    const login = document.getElementById('login');
+    if (!main.hidden) { main.hidden = true; login.hidden = false; }
+    if (ws) { ws.close(); ws = null; }
+    return null;
+  }
   if (!r.ok) { let m='errore '+r.status; try{const j=await r.json(); if(j.detail)m=j.detail;}catch(e){} toast(m,'err'); return null; }
   return r.json();
 }
 
 async function doLogin() {
   const r = await fetch('/api/login', {method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:$('pass').value})});
-  if (r.ok) { $('login').hidden=true; $('main').hidden=false; refresh(); connectLogs(); }
+  if (r.ok) { loggedIn=true; $('login').hidden=true; $('main').hidden=false; $('pass').value=''; refresh(); connectLogs(); }
   else { $('loginerr').textContent='Password errata.'; }
 }
 
@@ -381,7 +389,7 @@ function renderProcs(){
       <td class="mono">${p.cpu}</td><td class="mono">${p.mem}</td>
       <td class="mono">${esc(p.etime)}</td>
       <td class="cmd-cell mono" title="${esc(p.cmd)}">${esc(p.cmd)}</td>
-      <td><div class="rowactions"><button class="btn sm danger" title="Termina" onclick="killProc(${p.pid})">✕</button></div></td>
+      <td><div class="rowactions"><button class="btn sm danger" title="Termina (SIGTERM)" onclick="killProc(${p.pid},false)">✕</button><button class="btn sm warn" title="Uccidi (SIGKILL)" onclick="killProc(${p.pid},true)">💀</button></div></td>
     </tr>`).join('') : '<tr><td colspan="7" class="empty">Nessun processo trovato</td></tr>';
 }
 
@@ -394,11 +402,14 @@ async function dockerAct(a,name){
   const r = await api('/api/docker',{method:'POST',body:JSON.stringify({action:a,name})});
   if (r) toast('Docker '+a+' '+name, r.code===0?'ok':'err'); refresh();
 }
-async function killProc(pid){
-  confirmBox('Terminare il processo?','Vuoi terminare il processo PID <b>'+pid+'</b>?', async ()=>{ const r=await api('/api/kill',{method:'POST',body:JSON.stringify({pid})}); if(r){toast('Processo '+pid+' terminato','ok'); refresh();} });
+async function killProc(pid, force){
+  confirmBox(force?'Uccidere il processo (forzato)?':'Terminare il processo?',
+    'PID <b>'+pid+'</b>'+(force?' — SIGKILL forzato':' — SIGTERM normale')+'?',
+    async ()=>{ const r=await api('/api/kill',{method:'POST',body:JSON.stringify({pid,force})}); if(r){toast('Processo '+pid+(force?' ucciso':' terminato'),'ok'); refresh();} });
 }
 
 /* ── Shell ── */
+let shellHist=[], shellIdx=-1;
 function appendShell(t, cls){
   const el=$('shell');
   if (el.textContent.includes('scrivi un comando qui sotto')) el.innerHTML='';
@@ -408,6 +419,7 @@ function appendShell(t, cls){
 }
 async function runShell(){
   const cmd=$('cmd').value; if(!cmd.trim())return;
+  shellHist.push(cmd); shellIdx=shellHist.length;
   appendShell('\n$ '+cmd+'\n');
   const r=await api('/api/shell',{method:'POST',body:JSON.stringify({cmd})});
   if(r){
@@ -418,13 +430,19 @@ async function runShell(){
   $('cmd').value='';
 }
 
+// cronologia comandi con frecce su/giù
+$('cmd').addEventListener('keydown', e=>{
+  if(e.key==='ArrowUp'){ if(shellHist.length){ shellIdx=Math.max(0,shellIdx-1); $('cmd').value=shellHist[shellIdx]; e.preventDefault(); } }
+  else if(e.key==='ArrowDown'){ if(shellIdx<shellHist.length-1){ shellIdx++; $('cmd').value=shellHist[shellIdx]; } else { shellIdx=shellHist.length; $('cmd').value=''; } e.preventDefault(); }
+});
+
 /* ── Power / logout ── */
 function power(mode){
   confirmBox(mode==='reboot'?'Riavvia il server':'Spegni il server',
     'Sei sicuro di voler <b>'+ (mode==='reboot'?'riavviare':'spegnere') +'</b> il server?<br>La connessione verrà interrotta tra ~2 secondi.',
     async ()=>{ await api('/api/reboot',{method:'POST',body:JSON.stringify({mode})}); toast(mode==='reboot'?'Riavvio programmato':'Spegnimento programmato','warn'); });
 }
-function logout(){ fetch('/api/logout').then(()=>location.reload()); }
+function logout(){ fetch('/api/logout').then(()=>{ loggedIn=false; $('main').hidden=true; $('login').hidden=false; if(ws){ws.close();ws=null;} }); }
 
 /* ── Modal ── */
 let confirmCb=null;
@@ -450,8 +468,9 @@ function togglePause(){ logPaused=!logPaused; $('logpause').textContent=logPause
 function clearLog(){ $('logview').textContent=''; }
 
 /* ── avvio ── */
-(async()=>{ const d=await api('/api/status'); if(d){ $('login').hidden=true; $('main').hidden=false; refresh(); connectLogs(); } })();
-setInterval(refresh, 5000);
+let loggedIn = false;
+(async()=>{ const d=await api('/api/status'); if(d){ loggedIn=true; $('login').hidden=true; $('main').hidden=false; refresh(); connectLogs(); } })();
+setInterval(()=>{ if(loggedIn) refresh(); }, 5000);
 </script>
 </body>
 </html>
