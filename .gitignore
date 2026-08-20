@@ -11,3 +11,4 @@ log
 *.log
 data/*.log*
 nohup.out
+panel.env

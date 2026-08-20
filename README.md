@@ -477,3 +477,26 @@ If you add a site extractor, remember to register it in `bot/extractors/__init__
 [mautrix-telegram](https://github.com/tulir/mautrix-telegram) (© 2021 Tulir Asokan), MIT
 licensed. Third-party components — `yt-dlp`, `Telethon`, `Playwright` — remain under their
 own respective licenses.
+
+---
+
+## ServerPanel — optional web dashboard
+
+The repo includes a small **web control panel** (`panel.py` + `templates/panel.html`) to monitor
+and drive the server from a browser (phone or PC):
+
+- **Dashboard**: bot status, load, RAM/disk usage bars, uptime.
+- **Processes**: live list of user processes with CPU/mem, search + one-click kill.
+- **Docker**: every container with start/stop/restart.
+- **Terminal**: free shell box (`systemctl`, `docker`, scripts…) with a colored live view.
+- **Live logs**: real-time tail of `data/bot.log` over WebSocket (pause/clear controls).
+- **Power**: reboot or power-off the server straight from the UI.
+
+It is password-protected and intended to run inside a **private network** (LAN or **Tailscale**).
+
+```bash
+pip install fastapi "uvicorn[standard]" jinja2
+# create panel.env with: PANEL_PASSWORD=your_password
+sudo cp panel.service /etc/systemd/system/ && sudo systemctl enable --now panel
+# open http://<server>:8080  (over Tailscale: http://<hostname>:8080 from any device)
+```

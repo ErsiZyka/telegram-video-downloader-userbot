@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>ServerPanel</title>
+<style>
+  :root {
+    --bg:#0b0e14; --bg2:#0f131c; --card:#151a24; --card2:#1a2130;
+    --border:#252d3d; --border2:#2e3850;
+    --fg:#e8edf5; --muted:#8a94a6; --faint:#5c6678;
+    --accent:#4f8cff; --accent2:#6ea8ff; --accent-soft:rgba(79,140,255,.12);
+    --ok:#3fb950; --ok-soft:rgba(63,185,80,.14);
+    --err:#f85149; --err-soft:rgba(248,81,73,.14);
+    --warn:#e3b341; --warn-soft:rgba(227,179,65,.14);
+    --radius:14px; --radius-sm:9px;
+    --shadow:0 8px 30px rgba(0,0,0,.35);
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { height:100%; }
+  body { margin:0; font-family:var(--sans); background:linear-gradient(180deg,#0b0e14, #0e1220 40%, #0b0e14); color:var(--fg); }
+  .wrap { max-width:1080px; margin:0 auto; padding:0 16px 40px; }
+
+  /* ── Header ── */
+  header { position:sticky; top:0; z-index:40; background:rgba(11,14,20,.85); backdrop-filter:blur(10px); border-bottom:1px solid var(--border); }
+  .hdr { max-width:1080px; margin:0 auto; padding:12px 16px; display:flex; align-items:center; gap:12px; }
+  .logo { display:flex; align-items:center; gap:10px; font-size:17px; font-weight:700; letter-spacing:.2px; }
+  .logo .dot { width:30px; height:30px; border-radius:9px; display:grid; place-items:center; background:linear-gradient(135deg,#4f8cff,#7c5cff); box-shadow:0 4px 14px rgba(79,140,255,.4); }
+  .logo .host { color:var(--muted); font-weight:500; font-size:13px; }
+  .spacer { flex:1; }
+
+  .pill { display:inline-flex; align-items:center; gap:7px; padding:6px 12px; border-radius:999px; font-size:12.5px; font-weight:600; border:1px solid var(--border); background:var(--card2); }
+  .pill .led { width:8px; height:8px; border-radius:50%; }
+  .pill.on  { color:var(--ok);  border-color:rgba(63,185,80,.4);  background:var(--ok-soft);  }
+  .pill.on  .led { background:var(--ok);  box-shadow:0 0 8px var(--ok); }
+  .pill.off { color:var(--err); border-color:rgba(248,81,73,.4); background:var(--err-soft); }
+  .pill.off .led { background:var(--err); box-shadow:0 0 8px var(--err); }
+  .pill.idle { color:var(--muted); }
+
+  .btn { font:inherit; font-size:13.5px; font-weight:600; color:var(--fg); background:var(--card2); border:1px solid var(--border2); border-radius:var(--radius-sm); padding:9px 14px; cursor:pointer; display:inline-flex; align-items:center; gap:7px; transition:.15s; }
+  .btn:hover { background:#222b3d; border-color:#39445e; }
+  .btn:active { transform:translateY(1px); }
+  .btn.sm { padding:6px 10px; font-size:12.5px; }
+  .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn.primary:hover { background:var(--accent2); }
+  .btn.danger { background:var(--err-soft); border-color:rgba(248,81,73,.5); color:var(--err); }
+  .btn.danger:hover { background:rgba(248,81,73,.22); }
+  .btn.ok { background:var(--ok-soft); border-color:rgba(63,185,80,.5); color:var(--ok); }
+  .btn.warn { background:var(--warn-soft); border-color:rgba(227,179,65,.5); color:var(--warn); }
+  .btn.ghost { background:transparent; border-color:transparent; color:var(--muted); }
+  .btn.ghost:hover { background:var(--card2); color:var(--fg); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+
+  /* ── Login ── */
+  #login { min-height:100vh; display:grid; place-items:center; padding:20px; }
+  .login-card { width:100%; max-width:380px; background:var(--card); border:1px solid var(--border); border-radius:18px; padding:32px 28px; box-shadow:var(--shadow); }
+  .login-card .big { width:60px; height:60px; border-radius:18px; display:grid; place-items:center; font-size:30px; background:linear-gradient(135deg,#4f8cff,#7c5cff); margin-bottom:16px; box-shadow:0 8px 24px rgba(79,140,255,.4); }
+  .login-card h1 { font-size:20px; margin:0 0 4px; }
+  .login-card p { color:var(--muted); font-size:13.5px; margin:0 0 18px; }
+  .field { width:100%; background:var(--bg2); border:1px solid var(--border2); color:var(--fg); border-radius:var(--radius-sm); padding:12px 14px; font-size:15px; outline:none; transition:.15s; }
+  .field:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  .err-msg { color:var(--err); font-size:13px; margin-top:10px; min-height:18px; }
+
+  /* ── Tabs ── */
+  .tabs { display:flex; gap:4px; overflow-x:auto; padding:14px 0 0; scrollbar-width:none; }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tab { flex:0 0 auto; display:flex; align-items:center; gap:8px; padding:10px 16px; border-radius:10px 10px 0 0; color:var(--muted); font-weight:600; font-size:13.5px; cursor:pointer; border:1px solid transparent; border-bottom:none; background:transparent; }
+  .tab:hover { color:var(--fg); background:var(--card); }
+  .tab.active { color:var(--fg); background:var(--card); border-color:var(--border); }
+  .tab .n { background:var(--card2); color:var(--muted); border-radius:999px; font-size:11px; min-width:18px; height:18px; display:inline-grid; place-items:center; padding:0 5px; }
+  .tab.active .n { background:var(--accent-soft); color:var(--accent2); }
+
+  .panel { background:var(--card); border:1px solid var(--border); border-radius:0 0 var(--radius) var(--radius); }
+
+  /* ── Stat cards ── */
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; padding:16px; }
+  .stat { background:var(--card2); border:1px solid var(--border); border-radius:12px; padding:14px; }
+  .stat .label { font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.6px; display:flex; justify-content:space-between; align-items:center; }
+  .stat .label .ic { font-size:13px; }
+  .stat .value { font-size:20px; font-weight:700; margin-top:6px; font-variant-numeric:tabular-nums; }
+  .stat .sub { font-size:12px; color:var(--muted); margin-top:2px; }
+  .bar { height:5px; border-radius:3px; background:#0e1220; margin-top:8px; overflow:hidden; }
+  .bar > i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg,var(--accent),#7c5cff); transition:width .6s; }
+  .bar.warn > i { background:linear-gradient(90deg,var(--warn),var(--err)); }
+
+  /* ── Action row (bot control) ── */
+  .actions { display:flex; gap:8px; flex-wrap:wrap; padding:0 16px 16px; align-items:center; }
+  .hint { font-size:12.5px; color:var(--muted); margin:0; }
+  .botrow { display:flex; align-items:center; gap:12px; padding:16px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .botrow .bt { display:flex; align-items:center; gap:10px; flex:1; min-width:200px; }
+  .botrow .bt .ic { font-size:22px; }
+  .botrow .bt b { display:block; font-size:14px; }
+  .botrow .bt small { color:var(--muted); font-size:12px; }
+
+  /* ── Tables ── */
+  .table-scroll { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; min-width:640px; }
+  th { text-align:left; color:var(--faint); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.5px; padding:10px 12px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  td { padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:middle; }
+  tr:last-child td { border-bottom:none; }
+  tr:hover td { background:rgba(255,255,255,.02); }
+  td.mono, .mono { font-family:var(--mono); font-size:12px; }
+  .cmd-cell { max-width:380px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tag { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; background:var(--card2); border:1px solid var(--border); }
+  .rowactions { display:flex; gap:5px; }
+
+  /* ── Docker cards ── */
+  .dockers { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; padding:16px; }
+  .dcard { background:var(--card2); border:1px solid var(--border); border-radius:12px; padding:14px; }
+  .dcard .top { display:flex; align-items:center; gap:10px; }
+  .dcard .top .ic { width:34px; height:34px; border-radius:9px; display:grid; place-items:center; font-size:17px; background:#0e1220; border:1px solid var(--border); }
+  .dcard .top b { font-size:14px; display:block; word-break:break-all; }
+  .dcard .top small { color:var(--muted); font-size:12px; }
+  .dcard .st { margin:10px 0; font-size:12px; color:var(--muted); }
+  .dcard .btnrow { display:flex; gap:6px; }
+
+  /* ── Terminal ── */
+  .term-cmd { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--border); position:sticky; bottom:0; background:var(--card); }
+  .term-cmd input { flex:1; }
+  #shell { font-family:var(--mono); font-size:12.5px; line-height:1.6; background:var(--bg2); border:1px solid var(--border); border-radius:10px; margin:16px; padding:14px; height:300px; overflow-y:auto; white-space:pre-wrap; color:#c8d3e6; }
+  #shell .p { color:var(--accent2); }
+  #shell .err { color:var(--err); }
+  #shell .ok { color:var(--ok); }
+
+  /* ── Log ── */
+  #logview { font-family:var(--mono); font-size:12px; line-height:1.55; background:var(--bg2); border:1px solid var(--border); border-radius:10px; margin:16px; padding:14px; height:340px; overflow-y:auto; white-space:pre-wrap; color:#b8c3d8; }
+  .logbar { display:flex; gap:8px; padding:0 16px; align-items:center; }
+  .logbar .led { width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok); }
+
+  /* ── Danger zone ── */
+  .danger { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:16px; border-top:1px solid var(--border); }
+
+  /* ── Toast ── */
+  #toasts { position:fixed; right:16px; bottom:16px; z-index:100; display:flex; flex-direction:column; gap:8px; }
+  .toast { background:var(--card2); border:1px solid var(--border2); border-left:3px solid var(--accent); border-radius:10px; padding:11px 14px; font-size:13px; box-shadow:var(--shadow); animation:slide .25s ease; max-width:340px; }
+  .toast.ok { border-left-color:var(--ok); } .toast.err { border-left-color:var(--err); } .toast.warn { border-left-color:var(--warn); }
+  @keyframes slide { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+
+  /* ── Modal confirm ── */
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); backdrop-filter:blur(4px); display:none; place-items:center; z-index:90; padding:20px; }
+  .modal-bg.show { display:grid; }
+  .modal { background:var(--card); border:1px solid var(--border2); border-radius:16px; padding:24px; max-width:400px; width:100%; box-shadow:var(--shadow); }
+  .modal h3 { margin:0 0 8px; font-size:16px; }
+  .modal p { color:var(--muted); font-size:13.5px; margin:0 0 20px; }
+  .modal .btns { display:flex; gap:10px; justify-content:flex-end; }
+
+  .empty { text-align:center; color:var(--faint); padding:28px 16px; font-size:13px; }
+  .search { padding:12px 16px 0; }
+  .section-title { font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.6px; padding:16px 16px 0; }
+
+  @media (max-width:640px) {
+    .stats { grid-template-columns:repeat(2,1fr); }
+    .cmd-cell { max-width:160px; }
+    .btn { padding:9px 12px; }
+  }
+  @media (max-width:380px) {
+    .stats { grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ LOGIN ═══════════ -->
+<div id="login">
+  <div class="login-card">
+    <div class="big">🖥️</div>
+    <h1>ServerPanel</h1>
+    <p>Controlla il tuo server dal browser — telefono o PC.</p>
+    <div style="display:flex; gap:8px;">
+      <input type="password" id="pass" class="field" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()" autofocus>
+      <button class="btn primary" onclick="doLogin()">Accedi</button>
+    </div>
+    <div class="err-msg" id="loginerr"></div>
+  </div>
+</div>
+
+<!-- ═══════════ MAIN ═══════════ -->
+<div class="wrap" id="main" hidden>
+  <header>
+    <div class="hdr">
+      <div class="logo">
+        <div class="dot">🖥️</div>
+        <div>
+          <div>ServerPanel</div>
+          <div class="host" id="hostname">…</div>
+        </div>
+      </div>
+      <div class="spacer"></div>
+      <span class="pill idle" id="latpill" title="Ultimo aggiornamento">···</span>
+      <span class="pill" id="botpill"><span class="led"></span><span id="botpilltxt">bot …</span></span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <div class="tab active" data-tab="dash">📊 Dashboard</div>
+    <div class="tab" data-tab="procs">⚙️ Processi <span class="n" id="nprocs">0</span></div>
+    <div class="tab" data-tab="docker">🐳 Docker <span class="n" id="ndocker">0</span></div>
+    <div class="tab" data-tab="term">💻 Terminale</div>
+    <div class="tab" data-tab="logs">📜 Log</div>
+  </nav>
+
+  <div class="panel">
+
+    <!-- ── TAB Dashboard ── -->
+    <section id="tab-dash">
+      <div class="botrow">
+        <div class="bt">
+          <div class="ic">🤖</div>
+          <div><b>Bot videobot</b><small>Downloader Telegram video</small></div>
+        </div>
+        <button class="btn ok" onclick="botAct('start')">▶ Avvia</button>
+        <button class="btn" onclick="botAct('restart')">↻ Riavvia</button>
+        <button class="btn danger" onclick="botAct('stop')">■ Ferma</button>
+      </div>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="section-title">🐳 Container Docker</div>
+      <table class="compact" style="min-width:0;">
+        <tbody id="dockertbody">
+          <tr><td class="empty">…</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ── TAB Processi ── -->
+    <section id="tab-procs" hidden>
+      <div class="search"><input type="text" id="procfilter" class="field" placeholder="🔍 Cerca per nome/comando…" oninput="renderProcs()"></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>PID</th><th>Utente</th><th>CPU</th><th>Mem</th><th>Durata</th><th>Comando</th><th></th></tr></thead>
+          <tbody id="proctbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── TAB Docker ── -->
+    <section id="tab-docker" hidden>
+      <div class="dockers" id="dockercards"></div>
+    </section>
+
+    <!-- ── TAB Terminale ── -->
+    <section id="tab-term" hidden>
+      <div id="shell"><span class="p">$</span> scrivi un comando qui sotto</div>
+      <div class="term-cmd">
+        <input type="text" id="cmd" class="field mono" placeholder="es. systemctl restart videobot · docker ps · uptime" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')runShell()">
+        <button class="btn" onclick="runShell()">Esegui</button>
+      </div>
+    </section>
+
+    <!-- ── TAB Log ── -->
+    <section id="tab-logs" hidden>
+      <div class="logbar">
+        <span class="led"></span>
+        <span class="hint">Log in tempo reale del bot</span>
+        <div class="spacer"></div>
+        <button class="btn sm" id="logpause" onclick="togglePause()">⏸ Pausa</button>
+        <button class="btn sm ghost" onclick="clearLog()">🗑 Svuota vista</button>
+      </div>
+      <div id="logview">connessione…</div>
+    </section>
+
+    <div class="danger">
+      <b style="font-size:13px;">🔴 Server</b>
+      <button class="btn warn" onclick="power('reboot')">↻ Riavvia</button>
+      <button class="btn danger" onclick="power('poweroff')">⏻ Spegni</button>
+      <span class="hint">Avviene tra 2 secondi. Con Tailscale puoi riaccenderlo da remoto se configurato.</span>
+      <div class="spacer"></div>
+      <button class="btn ghost" onclick="logout()">Esci</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<!-- modal conferma -->
+<div class="modal-bg" id="modal">
+  <div class="modal">
+    <h3 id="mtitle"></h3>
+    <p id="mtext"></p>
+    <div class="btns">
+      <button class="btn" onclick="confirmDo(false)">Annulla</button>
+      <button class="btn danger" id="mok" onclick="confirmDo(true)">Conferma</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let ws=null, logPaused=false, logEl=null;
+let procs=[], docker=[];
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function toast(msg, kind='') {
+  const t=document.createElement('div'); t.className='toast '+kind; t.textContent=msg;
+  $('toasts').appendChild(t); setTimeout(()=>t.remove(), 3500);
+}
+
+async function api(path, opts={}) {
+  const r = await fetch(path, {headers:{'Content-Type':'application/json'}, ...opts});
+  if (r.status===401) { location.reload(); return null; }
+  if (!r.ok) { let m='errore '+r.status; try{const j=await r.json(); if(j.detail)m=j.detail;}catch(e){} toast(m,'err'); return null; }
+  return r.json();
+}
+
+async function doLogin() {
+  const r = await fetch('/api/login', {method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:$('pass').value})});
+  if (r.ok) { $('login').hidden=true; $('main').hidden=false; refresh(); connectLogs(); }
+  else { $('loginerr').textContent='Password errata.'; }
+}
+
+/* ── Tabs ── */
+[...document.querySelectorAll('.tab')].forEach(t=>t.onclick=()=>{
+  [...document.querySelectorAll('.tab')].forEach(x=>x.classList.remove('active'));
+  ['dash','procs','docker','term','logs'].forEach(s=>$('tab-'+s).hidden=true);
+  t.classList.add('active'); $('tab-'+t.dataset.tab).hidden=false;
+  if (t.dataset.tab==='logs' && logEl) logEl.scrollTop=logEl.scrollHeight;
+  if (t.dataset.tab==='term') $('cmd').focus();
+});
+
+/* ── Refresh / status ── */
+let lastRefresh=0;
+async function refresh() {
+  const d = await api('/api/status'); if (!d) return;
+  procs=d.procs||[]; docker=d.docker||[];
+  $('hostname').textContent = location.host;
+  const b=$('botpill');
+  if (d.bot.active) { b.className='pill on'; $('botpilltxt').textContent='bot attivo'; }
+  else { b.className='pill off'; $('botpilltxt').textContent='bot fermo'; }
+  $('latpill').textContent='aggiornato '+ (new Date().toLocaleTimeString('it-IT'));
+  renderStats(d.sys);
+  renderDocker(); renderProcs();
+}
+
+function renderStats(s){
+  const load = s.load? s.load.join(' · '):'?';
+  const ram = s.ram? Math.round((1-s.ram.free/s.ram.total)*100):0;
+  const diskUse = s.disk && s.disk[4]? s.disk[4].replace('%','') : 0;
+  const up = s.uptime || '?';
+  $('stats').innerHTML = `
+    <div class="stat"><div class="label">Load <span class="ic">📈</span></div><div class="value">${esc(load)}</div><div class="sub">media 1·5·15 min</div></div>
+    <div class="stat"><div class="label">RAM <span class="ic">🧠</span></div><div class="value">${ram}%</div>
+      <div class="bar ${ram>85?'warn':''}"><i style="width:${ram}%"></i></div>
+      <div class="sub">${s.ram? Math.round(s.ram.free/1073741824)+' GB liberi':''}</div></div>
+    <div class="stat"><div class="label">Disco <span class="ic">💾</span></div><div class="value">${diskUse}%</div>
+      <div class="bar ${diskUse>85?'warn':''}"><i style="width:${diskUse}%"></i></div>
+      <div class="sub">${s.disk? (s.disk[3]||'')+' usati':''}</div></div>
+    <div class="stat"><div class="label">Uptime <span class="ic">⏱</span></div><div class="value" style="font-size:15px;">${esc(up)}</div><div class="sub">${s.time||''}</div></div>`;
+}
+
+function renderDocker(){
+  $('ndocker').textContent = docker.length;
+  $('dockercards').innerHTML = docker.length? docker.map(c=>`
+    <div class="dcard">
+      <div class="top"><div class="ic">🐳</div>
+        <div style="min-width:0"><b>${esc(c.name)}</b><small>${esc(c.image)}</small></div></div>
+      <div class="st">${esc(c.status)}</div>
+      <div class="btnrow">
+        <button class="btn sm" onclick="dockerAct('restart','${esc(c.name)}')">↻</button>
+        <button class="btn sm ok" onclick="dockerAct('start','${esc(c.name)}')">▶</button>
+        <button class="btn sm danger" onclick="dockerAct('stop','${esc(c.name)}')">■</button>
+      </div>
+    </div>`).join('') : '<div class="empty">Nessun container Docker</div>';
+  // mini lista su dashboard
+  $('dockertbody').innerHTML = docker.slice(0,6).map(c=>
+    `<tr><td style="padding:7px 16px;"><span class="tag">${esc(c.status.split(' ')[0])}</span> ${esc(c.name)} <span style="color:var(--faint)">· ${esc(c.image)}</span></td></tr>`).join('')
+    || '<tr><td class="empty">Nessun container</td></tr>';
+}
+
+function renderProcs(){
+  const q = ($('procfilter').value||'').toLowerCase();
+  $('nprocs').textContent = procs.length;
+  const list = procs.filter(p=>!q || (p.cmd+p.user+p.pid).toLowerCase().includes(q));
+  $('proctbody').innerHTML = list.length? list.map(p=>`
+    <tr>
+      <td class="mono">${p.pid}</td><td>${esc(p.user)}</td>
+      <td class="mono">${p.cpu}</td><td class="mono">${p.mem}</td>
+      <td class="mono">${esc(p.etime)}</td>
+      <td class="cmd-cell mono" title="${esc(p.cmd)}">${esc(p.cmd)}</td>
+      <td><div class="rowactions"><button class="btn sm danger" title="Termina" onclick="killProc(${p.pid})">✕</button></div></td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">Nessun processo trovato</td></tr>';
+}
+
+/* ── Azioni ── */
+async function botAct(a){
+  const r = await api('/api/bot',{method:'POST',body:JSON.stringify({action:a})});
+  if (r){ const m=(r.out||r.err||'').trim(); if(m) toast(a+' bot: '+m.slice(0,80), r.code===0?'ok':'err'); toast('Bot: '+a, 'ok'); refresh(); setTimeout(refresh,1500); }
+}
+async function dockerAct(a,name){
+  const r = await api('/api/docker',{method:'POST',body:JSON.stringify({action:a,name})});
+  if (r) toast('Docker '+a+' '+name, r.code===0?'ok':'err'); refresh();
+}
+async function killProc(pid){
+  confirmBox('Terminare il processo?','Vuoi terminare il processo PID <b>'+pid+'</b>?', async ()=>{ const r=await api('/api/kill',{method:'POST',body:JSON.stringify({pid})}); if(r){toast('Processo '+pid+' terminato','ok'); refresh();} });
+}
+
+/* ── Shell ── */
+function appendShell(t, cls){
+  const el=$('shell');
+  if (el.textContent.includes('scrivi un comando qui sotto')) el.innerHTML='';
+  const pre=document.createElement('span'); if(cls)pre.className=cls;
+  pre.textContent=t==='\n'? '\n' : t;
+  el.appendChild(pre); el.scrollTop=el.scrollHeight;
+}
+async function runShell(){
+  const cmd=$('cmd').value; if(!cmd.trim())return;
+  appendShell('\n$ '+cmd+'\n');
+  const r=await api('/api/shell',{method:'POST',body:JSON.stringify({cmd})});
+  if(r){
+    if(r.out.trim()) appendShell(r.out+(r.out.endsWith('\n')?'':'\n'));
+    if(r.err && r.err.trim()) appendShell(r.err+(r.err.endsWith('\n')?'':'\n'),'err');
+    appendShell('→ exit '+r.code+'\n', r.code===0?'ok':'err');
+  }
+  $('cmd').value='';
+}
+
+/* ── Power / logout ── */
+function power(mode){
+  confirmBox(mode==='reboot'?'Riavvia il server':'Spegni il server',
+    'Sei sicuro di voler <b>'+ (mode==='reboot'?'riavviare':'spegnere') +'</b> il server?<br>La connessione verrà interrotta tra ~2 secondi.',
+    async ()=>{ await api('/api/reboot',{method:'POST',body:JSON.stringify({mode})}); toast(mode==='reboot'?'Riavvio programmato':'Spegnimento programmato','warn'); });
+}
+function logout(){ fetch('/api/logout').then(()=>location.reload()); }
+
+/* ── Modal ── */
+let confirmCb=null;
+function confirmBox(t,m,cb){ $('mtitle').innerHTML=t; $('mtext').innerHTML=m; $('modal').classList.add('show'); confirmCb=cb; }
+function confirmDo(v){ $('modal').classList.remove('show'); if(v&&confirmCb) confirmCb(); confirmCb=null; }
+
+/* ── Log ── */
+function connectLogs(){
+  if(ws) ws.close();
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/logs');
+  ws.onmessage=e=>{
+    if(logPaused) return;
+    const el=$('logview');
+    if(el.textContent==='connessione…') el.textContent='';
+    const follow = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    el.textContent += e.data+'\n';
+    if(el.textContent.length>120000) el.textContent=el.textContent.slice(-80000);
+    if(follow) el.scrollTop=el.scrollHeight;
+  };
+  ws.onclose=()=>{ setTimeout(connectLogs, 3000); };
+}
+function togglePause(){ logPaused=!logPaused; $('logpause').textContent=logPaused?'▶ Riprendi':'⏸ Pausa'; }
+function clearLog(){ $('logview').textContent=''; }
+
+/* ── avvio ── */
+(async()=>{ const d=await api('/api/status'); if(d){ $('login').hidden=true; $('main').hidden=false; refresh(); connectLogs(); } })();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
