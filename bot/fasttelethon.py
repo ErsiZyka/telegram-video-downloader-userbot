@@ -304,5 +304,39 @@ async def upload_file(client: TelegramClient,
                       progress_callback: callable = None,
 
                       ) -> TypeInputFile:
-    res = (await _internal_transfer_to_telegram(client, file, progress_callback))[0]
-    return res
+    """Upload with four safe in-flight MTProto parts per batch."""
+    part_size = 512 * 1024
+    parallelism = 4
+    file_size = os.path.getsize(file.name)
+    part_count = (file_size + part_size - 1) // part_size
+    is_large = file_size > 10 * 1024 * 1024
+    file_id = helpers.generate_random_long()
+    hash_md5 = hashlib.md5()
+    sent = 0
+
+    for first_part in range(0, part_count, parallelism):
+        requests = []
+        batch_size = 0
+        for part_index in range(first_part, min(first_part + parallelism, part_count)):
+            part = file.read(part_size)
+            if not part:
+                raise ValueError("File ended before all upload parts were read")
+            batch_size += len(part)
+            if is_large:
+                requests.append(SaveBigFilePartRequest(file_id, part_index, part_count, part))
+            else:
+                hash_md5.update(part)
+                requests.append(SaveFilePartRequest(file_id, part_index, part))
+
+        results = await client(requests)
+        if not all(results):
+            raise RuntimeError("Telegram rejected an upload part")
+        sent += batch_size
+        if progress_callback:
+            result = progress_callback(sent, file_size)
+            if inspect.isawaitable(result):
+                await result
+
+    if is_large:
+        return InputFileBig(file_id, part_count, os.path.basename(file.name))
+    return InputFile(file_id, part_count, os.path.basename(file.name), hash_md5.hexdigest())
