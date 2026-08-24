@@ -40,12 +40,17 @@ class BaseExtractor(ABC):
 
 def _is_stream_response(url: str, content_type: str) -> bool:
     """A response is 'the video' if it's an HLS playlist (by content-type or
-    .m3u8 in the URL) or a direct mp4. The streaming-community/vidxgo CDN serves
-    m3u8 with content-type 'application/vnd.apple.mpegurl' and the URL carries a
-    query string, so we must match by content-type, not extension."""
+    .m3u8 in the URL), an MPEG-DASH manifest (application/dash+xml or .mpd), or
+    a direct mp4. The streaming-community/vidxgo CDN serves m3u8 with
+    content-type 'application/vnd.apple.mpegurl' and the URL carries a query
+    string, so we must match by content-type, not extension. Some tube CDNs
+    (porndig/video-cdn) serve DASH manifests as master.mpd which yt-dlp can
+    download directly."""
     ct = (content_type or "").lower()
     u = (url or "").lower()
     if "mpegurl" in ct or "x-mpegurl" in ct:
+        return True
+    if "dash+xml" in ct or ".mpd" in u:
         return True
     if ".m3u8" in u:
         return True

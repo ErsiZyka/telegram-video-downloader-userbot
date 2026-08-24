@@ -65,6 +65,7 @@ class UniversalPlaywrightExtractor(PlaywrightVideoExtractor):
         "ok.xxx",
         "pervclips.com",
         "porn.com",
+        "porndig.com",
         "porngo.com",
         "pornhub.com",
         "pornone.com",
