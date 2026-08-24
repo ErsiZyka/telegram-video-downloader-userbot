@@ -27,6 +27,7 @@ from bot.downloader import (
     format_speed,
     format_eta,
     cleanup_orphan_files,
+    _is_blocked_error,
 )
 from bot.history import DownloadHistory
 from bot.fasttelethon import upload_file
@@ -335,6 +336,33 @@ async def download_and_upload(
                 except Exception:
                     pass
                 return "error"
+
+        if filepath is None:
+            # Il CDN rifiuta il download (403/forbidden) pur avendo yt-dlp
+            # estratto correttamente l'URL: riprova con il fallback browser,
+            # che ottiene un URL fresco + gli header anti-leech richiesti dal sito.
+            if _is_blocked_error(download_error or ""):
+                fallback = get_universal_fallback(url)
+                if fallback is not None:
+                    _log("Download bloccato dal CDN (%s): riestraggio via browser...",
+                         (download_error or "")[:90])
+                    await _safe_edit(status_msg,
+                        "🌐 CDN blocca il download: riestrazione via browser...")
+                    try:
+                        finfo = await fallback.extract(url)
+                        _log("Fallback browser ok: %s", finfo.url[:80])
+                        filepath = await loop.run_in_executor(
+                            None, download_video, finfo.url, quality,
+                            download_progress, 1, finfo.headers,
+                        )
+                        _log(f"Download completato dopo fallback browser: {filepath}")
+                    except CancelDownload:
+                        cleanup_orphan_files()
+                        await _safe_edit(status_msg, "🛑 Download annullato.")
+                        return "cancelled"
+                    except Exception as e3:
+                        _log(f"Fallback browser fallito: {e3!r}")
+                        filepath = None
 
         if filepath is None:
             cleanup_orphan_files()

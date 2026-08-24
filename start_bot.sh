@@ -1,24 +1,15 @@
 #!/bin/bash
-# start_bot.sh — Avvia il bot Telegram sul server Linux
-cd /home/ersi/condivisa/video_downloader_bot || exit 1
+# start_bot.sh — Avvia/riavvia il bot tramite il servizio systemd videobot.service
+#
+# NOTA STORICA: prima il bot girava in una sessione screen avviata da questo
+# script, ma conviveva anche con il servizio systemd videobot.service
+# (Restart=always): ogni riavvio manuale creava una DOPPIA ISTANZA che
+# condivideva la sessione SQLite di Telethon → "database is locked" e crash.
+# Ora systemd è l'unico gestore del bot: questo script si limita a riavviare
+# il servizio (chiederà la password di sudo).
 
-echo "=== Pulizia vecchi processi ==="
-pkill -9 -f 'python.*run.py' 2>/dev/null
-screen -wipe 2>/dev/null
-sleep 1
+if systemctl is-active --quiet videobot.service 2>/dev/null; then
+    echo "ℹ️  Il bot è già attivo (videobot.service): lo riavvio..."
+fi
 
-echo "=== Avvio bot in screen ==="
-export OPENSSL_CONF=/dev/null
-screen -dmS vdb ./venv/bin/python3 run.py
-sleep 5
-
-echo "=== Log ==="
-tail -8 data/bot.log
-
-echo ""
-echo "=== Processi ==="
-ps aux | grep run.py | grep -v grep || echo "NESSUN BOT"
-
-echo ""
-echo "=== Screen ==="
-screen -ls | grep vdb || echo "SCREEN NON TROVATA"
+exec sudo systemctl restart videobot.service

@@ -6,8 +6,13 @@ echo "=== Processi bot ==="
 ps aux | grep run.py | grep -v grep || echo "NESSUN BOT ATTIVO"
 
 echo ""
-echo "=== Screen session ==="
-screen -ls | grep vdb || echo "nessuna screen attiva"
+echo "=== Servizio systemd ==="
+if systemctl is-active --quiet videobot.service 2>/dev/null; then
+    echo "videobot.service: ATTIVO"
+    systemctl show videobot.service -p MainPID --value | xargs -I{} ps -p {} -o pid=,etime=,cmd=
+else
+    echo "videobot.service: NON ATTIVO"
+fi
 
 echo ""
 echo "=== WARP ==="
