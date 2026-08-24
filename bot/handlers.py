@@ -119,6 +119,22 @@ def extract_url(text: str) -> str | None:
     return url
 
 
+def extract_all_urls(text: str) -> list[str]:
+    """Extract ALL http(s) URLs from a message, in order, deduplicated.
+
+    Used for batch downloads: multiple links in one message are detected
+    automatically and queued one by one.
+    """
+    if not text:
+        return []
+    urls: list[str] = []
+    for u in re.findall(URL_REGEX, text):
+        u = u.rstrip("\"'.,);:]")
+        if u not in urls:
+            urls.append(u)
+    return urls
+
+
 def _escape_md(text: str) -> str:
     if not text:
         return ""
@@ -858,6 +874,37 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
                 await _safe_edit(status_msg, f"❌ Errore: {e}")
         return
 
+    if pending["type"] == "batch_quality":
+        choice = QUALITY_CHOICES.get(text_lower)
+        if text_lower in ("360", "720", "1080", "max"):
+            label = "MAX" if text_lower == "max" else f"{text_lower}p"
+            quality = text_lower
+        elif choice:
+            label, quality = choice
+        else:
+            await _safe_reply(event, "❌ Scrivi `1`, `2`, `3` o `4`.")
+            return
+
+        items = pending["items"]
+        _clear_pending(user_id)
+        queue = _get_queue()
+        n = 0
+        last_pos = 0
+        for it in items:
+            last_pos = queue.add(
+                it["url"], quality, it["title"], it.get("headers") or {})
+            n += 1
+        _log(f"Batch: {n} video accodati (qualità {quality}) da {user_id}")
+        if _current_item is None and last_pos == 1:
+            await _safe_reply(event,
+                f"⏳ Batch avviato: **{n} download** in qualità **{label}** "
+                f"uno per uno in automatico...")
+        else:
+            await _safe_reply(event,
+                f"📥 **{n} download in coda** (qualità **{label}**). "
+                f"Partono uno per uno in automatico al termine di quelli in corso.")
+        return
+
     if pending["type"] == "quality":
         choice = QUALITY_CHOICES.get(text_lower)
         if text_lower in ("360", "720", "1080", "max"):
@@ -891,6 +938,70 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
         return
 
 
+async def _process_batch(client, event, urls: list[str], channel_id: int) -> None:
+    """Handle multiple links in ONE message: analyze each, show a confirmation
+    with the titles, ask ONE quality for all, then queue them one by one.
+
+    The queue worker processes items FIFO, so batch items download
+    sequentially in automatic order.
+    """
+    user_id = event.sender_id
+    status_msg = await _safe_reply(
+        event, f"🔍 Analisi batch: {len(urls)} link...")
+    items = []  # {url, title, headers}
+    skipped = []
+    loop = asyncio.get_running_loop()
+
+    for i, url in enumerate(urls, 1):
+        try:
+            async with _extract_lock:
+                info = await loop.run_in_executor(None, extract_info, url)
+            if isinstance(info, list):
+                # Playlist: usa il primo titolo come etichetta (scarica la playlist)
+                title = (info[0].get("title") if info else None) or "Playlist"
+                items.append({"url": url, "title": f"📋 {title}", "headers": {}})
+            else:
+                title = info.get("title") or "Sconosciuto"
+                items.append({"url": url, "title": title, "headers": {}})
+        except (ExtractError, VideoUnavailableError):
+            # yt-dlp non supporta il sito: prova il fallback universale (browser)
+            fallback = get_universal_fallback(url)
+            if fallback is not None:
+                try:
+                    finfo = await fallback.extract(url)
+                    items.append({"url": finfo.url, "title": finfo.title or "Video",
+                                  "headers": finfo.headers or {}})
+                except Exception as e2:
+                    _log(f"Batch fallback universale fallito per {url}: {e2!r}")
+                    skipped.append(url)
+            else:
+                skipped.append(url)
+        except Exception as e:
+            _log(f"Batch analisi fallita per {url}: {e!r}")
+            skipped.append(url)
+        try:
+            current = items[-1]["title"][:50] if items else "..."
+            await _safe_edit(status_msg, f"🔍 Analisi batch ({i}/{len(urls)}): {current}")
+        except Exception:
+            pass
+
+    if not items:
+        await _safe_edit(status_msg, "❌ Nessun link valido nel batch.")
+        return
+
+    lines = [f"📦 **Batch: {len(items)} video**\n"]
+    for idx, it in enumerate(items, 1):
+        lines.append(f"{idx}. 🎬 {_escape_md(it['title'][:60])}")
+    if skipped:
+        lines.append(f"\n⚠️ {len(skipped)} link non elaborabili: {len(skipped)} saltati")
+    lines.append("\nScrivi la qualità per TUTTI i video:")
+    lines.append("`1`=360p  `2`=720p  `3`=1080p  `4`=MAX")
+
+    await _safe_edit(status_msg, "\n".join(lines))
+    _set_pending(user_id, {"type": "batch_quality", "items": items})
+    _log(f"Batch pronto: {len(items)} video da {user_id}")
+
+
 # ─── Message handler ───
 
 async def on_message(client, event, whitelist: Whitelist, channel_id: int, owner_id: int) -> None:
@@ -901,12 +1012,23 @@ async def on_message(client, event, whitelist: Whitelist, channel_id: int, owner
         return
 
     text = (event.message.text or "").strip()
-    url = extract_url(text)
+    urls = extract_all_urls(text)
 
+    if len(urls) > 1:
+        _clear_pending(user_id)
+        _log(f"Batch di {len(urls)} link da {user_id}")
+        await _process_batch(client, event, urls, channel_id)
+        return
+
+    url = urls[0] if urls else None
     if url:
         _clear_pending(user_id)
         _log(f"Nuovo link da {user_id}: {url}")
         await _process_link(client, event, url, channel_id)
+        return
+
+    if event.message.media:
+        await _process_forwarded_media(client, event, channel_id)
         return
 
     pending = _get_pending(user_id)
