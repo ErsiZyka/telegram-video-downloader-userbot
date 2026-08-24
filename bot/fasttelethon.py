@@ -304,38 +304,52 @@ async def upload_file(client: TelegramClient,
                       progress_callback: callable = None,
 
                       ) -> TypeInputFile:
-    """Upload with four safe in-flight MTProto parts per batch."""
-    part_size = 512 * 1024
-    parallelism = 4
+    """Upload con connessioni MTProto parallele (stile FastTelethon).
+
+    Il vecchio approccio inviava i parti tramite client(requests): tutte le
+    richieste viaggiavano su UNA sola connessione TCP → throughput limitato
+    dal pipelining MTProto. Qui ogni connessione parallela apre un proprio
+    MTProtoSender (TCP separato verso il DC di Telegram): per file grandi si
+    arriva a 20 connessioni con 20 parti in volo, accelerando molto l'upload.
+    """
     file_size = os.path.getsize(file.name)
-    part_count = (file_size + part_size - 1) // part_size
-    is_large = file_size > 10 * 1024 * 1024
     file_id = helpers.generate_random_long()
     hash_md5 = hashlib.md5()
+
+    uploader = ParallelTransferrer(client)
+    part_size, part_count, is_large = await uploader.init_upload(
+        file_id, file_size, part_size_kb=512)
+    buffer = bytearray()
     sent = 0
-
-    for first_part in range(0, part_count, parallelism):
-        requests = []
-        batch_size = 0
-        for part_index in range(first_part, min(first_part + parallelism, part_count)):
-            part = file.read(part_size)
-            if not part:
-                raise ValueError("File ended before all upload parts were read")
-            batch_size += len(part)
-            if is_large:
-                requests.append(SaveBigFilePartRequest(file_id, part_index, part_count, part))
+    try:
+        for data in stream_file(file):
+            if not is_large:
+                hash_md5.update(data)
+            # upload() vuole parti esattamente di part_size: accumulo i chunk
+            # da 1KB e taglio via via una parte piena (stessa logica del
+            # transfer originale mautrix).
+            if len(buffer) == 0 and len(data) == part_size:
+                await uploader.upload(data)
             else:
-                hash_md5.update(part)
-                requests.append(SaveFilePartRequest(file_id, part_index, part))
-
-        results = await client(requests)
-        if not all(results):
-            raise RuntimeError("Telegram rejected an upload part")
-        sent += batch_size
-        if progress_callback:
-            result = progress_callback(sent, file_size)
-            if inspect.isawaitable(result):
-                await result
+                new_len = len(buffer) + len(data)
+                if new_len >= part_size:
+                    cutoff = part_size - len(buffer)
+                    buffer.extend(data[:cutoff])
+                    await uploader.upload(bytes(buffer))
+                    buffer.clear()
+                    buffer.extend(data[cutoff:])
+                else:
+                    buffer.extend(data)
+            sent += len(data)
+            if progress_callback:
+                result = progress_callback(sent, file_size)
+                if inspect.isawaitable(result):
+                    await result
+        if len(buffer) > 0:
+            await uploader.upload(bytes(buffer))
+    finally:
+        # Chiude anche i task pendenti di ogni sender (vedi UploadSender.next).
+        await uploader.finish_upload()
 
     if is_large:
         return InputFileBig(file_id, part_count, os.path.basename(file.name))

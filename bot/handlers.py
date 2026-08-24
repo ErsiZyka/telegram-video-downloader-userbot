@@ -526,9 +526,24 @@ async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
         headers = item.get("headers") or None
         _log(f"Worker processa: {url} [{quality}]")
         try:
-            status_msg = await client.send_message(
-                owner_id, f"⏳ Avvio download: **{_escape_md(title)}** [{quality}]..."
-            )
+            try:
+                status_msg = await client.send_message(
+                    owner_id, f"⏳ Avvio download: **{_escape_md(title)}** [{quality}]..."
+                )
+            except FloodWaitError as e:
+                # Rate-limit Telegram sul solo messaggio di stato: attendere è
+                # obbligatorio, ma l'item NON deve fallire per questo. Attendi,
+                # riprova una volta e, se ancora bloccato, prosegui senza
+                # messaggio di stato (gli aggiornamenti restano nel log).
+                _log(f"FloodWait {e.seconds}s su 'Avvio download' per {url}: attendo...")
+                await asyncio.sleep(min(e.seconds + 3, 600))
+                try:
+                    status_msg = await client.send_message(
+                        owner_id, f"⏳ Avvio download: **{_escape_md(title)}** [{quality}]..."
+                    )
+                except FloodWaitError as e2:
+                    _log(f"FloodWait persistente ({e2.seconds}s): proseguo senza status message")
+                    status_msg = None
             await download_and_upload(
                 client, status_msg, url, quality, title, channel_id, owner_id,
                 headers=headers,

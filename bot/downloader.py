@@ -164,6 +164,10 @@ def _is_blocked_error(msg: str) -> bool:
     return any(k in lowered for k in (
         "403", "forbidden", "http error 400", "bad request",
         "cloudflare", "captcha", "access denied", "blocked",
+        # aria2c esce con codice 22 su qualunque risposta HTTP >= 400 senza
+        # stampare lo status: i CDN di bigfuck.tv/bustybus.com rispondono così
+        # (403) agli URL token-gated estratti da yt-dlp.
+        "aria2c exited with code 22",
     ))
 
 
@@ -452,22 +456,33 @@ def download_video(
         so the retry loop can restart with more concurrent connections.
         """
         slow_started = None
+        slow_prev_downloaded = 0
 
         def hook(d: dict) -> None:
-            nonlocal slow_started
+            nonlocal slow_started, slow_prev_downloaded
             if d["status"] == "downloading":
                 downloaded = d.get("downloaded_bytes", 0) or 0
                 total = d.get("total_bytes", 0) or d.get("total_bytes_estimate", 0) or 0
                 speed = d.get("speed", 0) or 0
 
-                # Slow-start detector: first 8s of a download. If total data
-                # moved stays under 250 KB/s, the CDN is throttling the
-                # connection -> abort and retry with more fragments.
+                # Slow-start detector: scatta solo nei secondi iniziali del
+                # trasferimento, quando ENTRAMBI la media e la velocità
+                # istantanea sono ben sotto soglia. Due guardie evitano i
+                # falsi positivi vidi sui download DASH (video+audio):
+                #  - per l'audio yt-dlp riparte da byte 0: se il contatore
+                #    salta all'indietro ricomincia anche la finestra di osserva-
+                #    zione (prima il detector uccideva il download al ~95%);
+                #  - durante il merge/tra le fasi gli hook si fermano da soli,
+                #    quindi richiediamo anche che la velocità istantanea
+                #    riportata da yt-dlp sia bassa per dichiarare throttle.
                 now = time.monotonic()
-                if slow_started is None:
+                if slow_started is None or downloaded + 1024 * 1024 < slow_prev_downloaded:
                     slow_started = now
+                slow_prev_downloaded = downloaded
                 elapsed = now - slow_started
-                if elapsed >= SLOW_START_GRACE_S and downloaded < SLOW_START_MIN_BPS * elapsed:
+                if (elapsed >= SLOW_START_GRACE_S
+                        and downloaded < SLOW_START_MIN_BPS * elapsed
+                        and speed * 4 < SLOW_START_MIN_BPS):
                     rate = downloaded / elapsed / 1024 if elapsed > 0 else 0
                     _log.warning("Partenza lenta: %.0f KB/s dopo %.0fs -> riavvio con più connessioni", rate, elapsed)
                     raise _SlowStartError("slow start")

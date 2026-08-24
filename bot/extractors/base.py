@@ -13,6 +13,22 @@ from bot.logging_config import get_logger
 
 _log = get_logger("extractor")
 
+# Camoufox (Firefox anti-fingerprint): engine di secondo livello usato SOLO
+# quando la pagina mostra un challenge Cloudflare che Chromium non supera.
+try:
+    from camoufox.async_api import AsyncCamoufox  # noqa: F401
+    CAMOUFOX_AVAILABLE = True
+except ImportError:
+    CAMOUFOX_AVAILABLE = False
+
+# Marker del challenge Cloudflare nel titolo e nel corpo della pagina.
+_CF_TITLE_MARKERS = ("just a moment", "ci siamo quasi", "attention required")
+_CF_BODY_MARKERS = _CF_TITLE_MARKERS + (
+    "verifica di sicurezza",
+    "checking your browser",
+    "enable javascript and cookies",
+)
+
 
 @dataclass
 class VideoInfo:
@@ -38,6 +54,13 @@ class BaseExtractor(ABC):
         ...
 
 
+# Estensione finale valida per uno stream: .mpd/.m3u8/.mp4 devono essere
+# seguiti da fine-string, '?' o '/'. Serve a NON beccare casi come
+# "preview_1080p.mp4.jpg" (thumbnail dei tube site) che contengono ".mp4"
+# in mezzo all'URL ma sono immagini.
+_STREAM_EXT_RE = re.compile(r"\.(mpd|m3u8|mp4)(?:[?#]|$)")
+
+
 def _is_stream_response(url: str, content_type: str) -> bool:
     """A response is 'the video' if it's an HLS playlist (by content-type or
     .m3u8 in the URL), an MPEG-DASH manifest (application/dash+xml or .mpd), or
@@ -48,13 +71,13 @@ def _is_stream_response(url: str, content_type: str) -> bool:
     download directly."""
     ct = (content_type or "").lower()
     u = (url or "").lower()
+    if ct.startswith("image/"):
+        return False
     if "mpegurl" in ct or "x-mpegurl" in ct:
         return True
-    if "dash+xml" in ct or ".mpd" in u:
+    if "dash+xml" in ct:
         return True
-    if ".m3u8" in u:
-        return True
-    if ".mp4" in u and "youtube" not in u and "googlevideo" not in u:
+    if _STREAM_EXT_RE.search(u):
         return True
     return False
 
@@ -96,10 +119,12 @@ class PlaywrightVideoExtractor(BaseExtractor):
     DOMAINS: tuple[str, ...] = ()
     RENDER_WAIT = 10   # seconds to wait for the JS player to render
     AFTER_CLICK_WAIT = 12  # seconds to wait after clicking play for the stream
+    HEADLESS: bool = True  # some sites refuse to mount the player in headless
 
     async def extract(self, url: str) -> VideoInfo:
         video_url: str | None = None
         video_headers: dict = {}
+        cf_suspect = False
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
         async def _on_response(response):
@@ -109,7 +134,13 @@ class PlaywrightVideoExtractor(BaseExtractor):
             try:
                 u = response.url
                 ct = response.headers.get("content-type", "")
+                st = response.status
             except Exception:
+                return
+            # Scarta le risposte d'errore: alcuni player espongono nell'HTML
+            # un URL video con token GIÀ SCADUTO che il CDN risponde 403 (es.
+            # bustybus): catturarlo produrrebbe un download fallito a colpo sicuro.
+            if st >= 400:
                 return
             if _is_stream_response(u, ct):
                 video_url = u
@@ -132,7 +163,7 @@ class PlaywrightVideoExtractor(BaseExtractor):
             async with async_playwright() as p:
                 _log.info("Avvio Chromium headless per %s", url)
                 browser = await p.chromium.launch(
-                    headless=True,
+                    headless=self.HEADLESS,
                     args=["--disable-blink-features=AutomationControlled"],
                 )
                 context = await browser.new_context(
@@ -166,6 +197,20 @@ class PlaywrightVideoExtractor(BaseExtractor):
                 except Exception:
                     title = "Video"
 
+                # Rileva subito se la pagina è un challenge Cloudflare: in tal
+                # caso Chromium non passerà mai e il retry va fatto con un
+                # browser anti-fingerprint (vedi _extract_camoufox).
+                tl = (title or "").lower()
+                if any(k in tl for k in _CF_TITLE_MARKERS):
+                    cf_suspect = True
+                else:
+                    try:
+                        body_snip = ((await page.inner_text("body")) or "")[:500].lower()
+                        if any(k in body_snip for k in _CF_BODY_MARKERS):
+                            cf_suspect = True
+                    except Exception:
+                        pass
+
                 # Wait for the JS player to render, then click play inside the
                 # player frame. Use JS evaluate() to click (bypasses the
                 # 'element is outside the viewport' check that breaks headless).
@@ -186,10 +231,105 @@ class PlaywrightVideoExtractor(BaseExtractor):
             raise RuntimeError(f"Browser error: {e}") from e
 
         if video_url is None:
+            if cf_suspect and CAMOUFOX_AVAILABLE:
+                _log.info("Challenge Cloudflare rilevata: riprovo con Camoufox...")
+                try:
+                    info = await self._extract_camoufox(url)
+                    _log.info("Camoufox: stream trovato %s", info.url[:100])
+                    return info
+                except Exception as e:
+                    _log.warning("Anche Camoufox ha fallito: %r", e)
+            elif cf_suspect:
+                _log.warning("Challenge Cloudflare rilevata ma Camoufox non installato "
+                             "(pip install camoufox[geoip] && python -m camoufox fetch)")
             raise RuntimeError("Nessuno stream video trovato entro il timeout.")
         _log.info("Stream trovato: %s", video_url[:100])
         return VideoInfo(url=video_url, title=title,
                          headers=video_headers or dict(_STREAM_HEADERS))
+
+    async def _extract_camoufox(self, url: str) -> VideoInfo:
+        """Secondo tentativo con Camoufox (Firefox anti-fingerprint): supera i
+        challenge Cloudflare Turnstile che bloccano Chromium (es. xgroovy).
+        Usa un display virtuale Xvfb interno, quindi funziona anche su server
+        senza sessione grafica."""
+        from camoufox.async_api import AsyncCamoufox
+
+        video_url: str | None = None
+        video_headers: dict = {}
+        title = "Video"
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+        async def _on_response(response):
+            nonlocal video_url, video_headers
+            if video_url is not None or future.done():
+                return
+            try:
+                u = response.url
+                ct = response.headers.get("content-type", "")
+                st = response.status
+            except Exception:
+                return
+            if st >= 400:
+                return
+            if _is_stream_response(u, ct):
+                video_url = u
+                try:
+                    req_headers = response.request.headers
+                    video_headers = {
+                        k: v for k, v in req_headers.items()
+                        if k.lower() not in ("host", "content-length", "cookie")
+                    }
+                except Exception:
+                    video_headers = {}
+                _log.info("[Camoufox] Stream intercettato: %s", u[:100])
+                if not future.done():
+                    future.set_result(u)
+
+        _log.info("[Camoufox] Avvio per %s", url[:80])
+        async with AsyncCamoufox(headless=False, virtual_display=":99",
+                                 humanize=True) as browser:
+            page = await browser.new_page()
+            page.on("response", _on_response)
+            page.on("frameattached", lambda f: f.on("response", _on_response))
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            except PlaywrightError as e:
+                _log.warning("[Camoufox] goto timeout/errore (procedo): %s", e)
+
+            # Attendi lo scioglimento del challenge (fino a ~150s): il widget
+            # Turnstile invisibile si risolve da solo con fingerprint pulito.
+            for _ in range(30):
+                await asyncio.sleep(5)
+                if future.done():
+                    break
+                try:
+                    txt = ((await page.inner_text("body")) or "")[:600].lower()
+                except Exception:
+                    txt = "challenge"
+                if not any(k in txt for k in _CF_BODY_MARKERS):
+                    break
+
+            try:
+                title = (await page.title()) or "Video"
+            except Exception:
+                pass
+
+            if video_url is None:
+                await asyncio.sleep(self.RENDER_WAIT)
+                _log.info("[Camoufox] Click play button...")
+                try:
+                    await self._click_play(page)
+                except Exception as e:
+                    _log.warning("[Camoufox] click fallito: %r", e)
+                try:
+                    await asyncio.wait_for(future, timeout=self.AFTER_CLICK_WAIT + 20)
+                except asyncio.TimeoutError:
+                    _log.warning("[Camoufox] Nessuno stream dopo il click")
+
+        if video_url is None:
+            raise RuntimeError("Nessuno stream trovato (Camoufox)")
+        return VideoInfo(url=video_url, title=title,
+                         headers=video_headers or {})
 
     async def _click_play(self, page) -> None:
         """Find the player (possibly inside an iframe) and click its play button
