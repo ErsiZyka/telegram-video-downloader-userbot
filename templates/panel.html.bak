@@ -164,6 +164,20 @@
 </head>
 <body>
 
+<!-- ═══════════ LOGIN ═══════════ -->
+<div id="login">
+  <div class="login-card">
+    <div class="big">🖥️</div>
+    <h1>ServerPanel</h1>
+    <p>Controlla il tuo server dal browser — telefono o PC.</p>
+    <div style="display:flex; gap:8px;">
+      <input type="password" id="pass" class="field" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()" autofocus>
+      <button class="btn primary" onclick="doLogin()">Accedi</button>
+    </div>
+    <div class="err-msg" id="loginerr"></div>
+  </div>
+</div>
+
 <!-- ═══════════ MAIN ═══════════ -->
 <div class="wrap" id="main" hidden>
   <header>
@@ -204,9 +218,6 @@
       </div>
 
       <div class="stats" id="stats"></div>
-
-      <div class="section-title">🚀 I tuoi script</div>
-      <div class="dockers" id="scriptcards"><div class="empty">Caricamento script…</div></div>
 
       <div class="section-title">🐳 Container Docker</div>
       <table class="compact" style="min-width:0;">
@@ -259,6 +270,7 @@
       <button class="btn danger" onclick="power('poweroff')">⏻ Spegni</button>
       <span class="hint">Avviene tra 2 secondi. Con Tailscale puoi riaccenderlo da remoto se configurato.</span>
       <div class="spacer"></div>
+      <button class="btn ghost" onclick="logout()">Esci</button>
     </div>
   </div>
 </div>
@@ -279,7 +291,7 @@
 
 <script>
 let ws=null, logPaused=false, logEl=null;
-let procs=[], docker=[], scripts=[];
+let procs=[], docker=[];
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -292,12 +304,21 @@ function toast(msg, kind='') {
 async function api(path, opts={}) {
   const r = await fetch(path, {headers:{'Content-Type':'application/json'}, ...opts});
   if (r.status===401) {
-    // nessun login: la sessione non esiste più, non c'è nulla da mostrare
-    console.log('sessione scaduta (nessun login)');
+    // sessione scaduta: torna al login senza loop di reload
+    const main = document.getElementById('main');
+    const login = document.getElementById('login');
+    if (!main.hidden) { main.hidden = true; login.hidden = false; }
+    if (ws) { ws.close(); ws = null; }
     return null;
   }
   if (!r.ok) { let m='errore '+r.status; try{const j=await r.json(); if(j.detail)m=j.detail;}catch(e){} toast(m,'err'); return null; }
   return r.json();
+}
+
+async function doLogin() {
+  const r = await fetch('/api/login', {method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:$('pass').value})});
+  if (r.ok) { loggedIn=true; $('login').hidden=true; $('main').hidden=false; $('pass').value=''; refresh(); connectLogs(); }
+  else { $('loginerr').textContent='Password errata.'; }
 }
 
 /* ── Tabs ── */
@@ -313,14 +334,14 @@ async function api(path, opts={}) {
 let lastRefresh=0;
 async function refresh() {
   const d = await api('/api/status'); if (!d) return;
-  procs=d.procs||[]; docker=d.docker||[]; scripts=d.scripts||[];
+  procs=d.procs||[]; docker=d.docker||[];
   $('hostname').textContent = location.host;
   const b=$('botpill');
   if (d.bot.active) { b.className='pill on'; $('botpilltxt').textContent='bot attivo'; }
   else { b.className='pill off'; $('botpilltxt').textContent='bot fermo'; }
   $('latpill').textContent='aggiornato '+ (new Date().toLocaleTimeString('it-IT'));
   renderStats(d.sys);
-  renderScripts(); renderDocker(); renderProcs();
+  renderDocker(); renderProcs();
 }
 
 function renderStats(s){
@@ -337,20 +358,6 @@ function renderStats(s){
       <div class="bar ${diskUse>85?'warn':''}"><i style="width:${diskUse}%"></i></div>
       <div class="sub">${s.disk? (s.disk[3]||'')+' usati':''}</div></div>
     <div class="stat"><div class="label">Uptime <span class="ic">⏱</span></div><div class="value" style="font-size:15px;">${esc(up)}</div><div class="sub">${s.time||''}</div></div>`;
-}
-
-function renderScripts(){
-  $('scriptcards').innerHTML = scripts.length ? scripts.map(s=>`
-    <div class="dcard">
-      <div class="top"><div class="ic">${esc(s.icon||'📜')}</div>
-        <div style="min-width:0"><b>${esc(s.name)}</b><small>${esc(s.description||s.path||s.service)}</small></div></div>
-      <div class="st"><span class="tag">${s.service?(s.active?'● Attivo':'○ Fermato'):'◌ Da configurare'}</span> <span class="mono">${esc(s.service||s.path)}</span></div>
-      <div class="btnrow">${s.service ? `
-        <button class="btn sm ok" onclick="scriptAct('start','${esc(s.id)}')">▶ Avvia</button>
-        <button class="btn sm" onclick="scriptAct('restart','${esc(s.id)}')">↻ Riavvia</button>
-        <button class="btn sm danger" onclick="scriptAct('stop','${esc(s.id)}')">■ Ferma</button>` : '<span class="hint">Visibile automaticamente</span>'}
-      </div>
-    </div>`).join('') : '<div class="empty">Nessuno script registrato</div>';
 }
 
 function renderDocker(){
@@ -395,10 +402,6 @@ async function dockerAct(a,name){
   const r = await api('/api/docker',{method:'POST',body:JSON.stringify({action:a,name})});
   if (r) toast('Docker '+a+' '+name, r.code===0?'ok':'err'); refresh();
 }
-async function scriptAct(a,id){
-  const r = await api('/api/script',{method:'POST',body:JSON.stringify({action:a,id})});
-  if (r) { toast('Script '+a, r.code===0?'ok':'err'); refresh(); setTimeout(refresh,1200); }
-}
 async function killProc(pid, force){
   confirmBox(force?'Uccidere il processo (forzato)?':'Terminare il processo?',
     'PID <b>'+pid+'</b>'+(force?' — SIGKILL forzato':' — SIGTERM normale')+'?',
@@ -433,12 +436,13 @@ $('cmd').addEventListener('keydown', e=>{
   else if(e.key==='ArrowDown'){ if(shellIdx<shellHist.length-1){ shellIdx++; $('cmd').value=shellHist[shellIdx]; } else { shellIdx=shellHist.length; $('cmd').value=''; } e.preventDefault(); }
 });
 
-/* ── Power ── */
+/* ── Power / logout ── */
 function power(mode){
   confirmBox(mode==='reboot'?'Riavvia il server':'Spegni il server',
     'Sei sicuro di voler <b>'+ (mode==='reboot'?'riavviare':'spegnere') +'</b> il server?<br>La connessione verrà interrotta tra ~2 secondi.',
     async ()=>{ await api('/api/reboot',{method:'POST',body:JSON.stringify({mode})}); toast(mode==='reboot'?'Riavvio programmato':'Spegnimento programmato','warn'); });
 }
+function logout(){ fetch('/api/logout').then(()=>{ loggedIn=false; $('main').hidden=true; $('login').hidden=false; if(ws){ws.close();ws=null;} }); }
 
 /* ── Modal ── */
 let confirmCb=null;
@@ -449,7 +453,6 @@ function confirmDo(v){ $('modal').classList.remove('show'); if(v&&confirmCb) con
 function connectLogs(){
   if(ws) ws.close();
   ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/logs');
-  ws.onopen=()=>{ /* nessun auth richiesto */ };
   ws.onmessage=e=>{
     if(logPaused) return;
     const el=$('logview');
@@ -466,7 +469,7 @@ function clearLog(){ $('logview').textContent=''; }
 
 /* ── avvio ── */
 let loggedIn = false;
-(function(){ loggedIn=true; $('main').hidden=false; refresh(); connectLogs(); })();
+(async()=>{ const d=await api('/api/status'); if(d){ loggedIn=true; $('login').hidden=true; $('main').hidden=false; refresh(); connectLogs(); } })();
 setInterval(()=>{ if(loggedIn) refresh(); }, 5000);
 </script>
 </body>

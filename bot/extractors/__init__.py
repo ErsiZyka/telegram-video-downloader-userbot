@@ -37,9 +37,13 @@ _EXTRACTORS: list[type[BaseExtractor]] = [
 if _PLAYWRIGHT_AVAILABLE:
     from bot.extractors.altadefinizione import AltaDefinizioneExtractor
     from bot.extractors.streamingcommunity import StreamingCommunityExtractor
+    from bot.extractors.xinindia import XinIndiaExtractor
+    from bot.extractors.supjav import SupjavExtractor
     _EXTRACTORS.extend([
         AltaDefinizioneExtractor,
         StreamingCommunityExtractor,
+        XinIndiaExtractor,
+        SupjavExtractor,
     ])
 
 

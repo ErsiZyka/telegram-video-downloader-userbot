@@ -444,6 +444,12 @@ def download_video(
     if quality not in QUALITY_FORMATS:
         raise ValueError(f"Qualità non valida: {quality}. Usa: {list(QUALITY_FORMATS.keys())}")
 
+    # supjav.com: HLS protetto da MOUFLON (live relay con token a scadenza).
+    # yt-dlp non lo supporta: serve il recorder dedicato che registra i
+    # segmenti in tempo reale man mano che il relay li genera.
+    if _is_mouflon_url(url):
+        return _download_mouflon_relay(url, quality, progress_callback, extra_headers)
+
     format_str = QUALITY_FORMATS[quality]
     _log.info("Download richiesto: %s qualità=%s format=%s", url[:80], quality, format_str)
     output_template = os.path.join("downloads", "%(title).100s.%(ext)s")
@@ -602,3 +608,258 @@ def cleanup_orphan_files(download_dir: str = "downloads") -> list[str]:
                 except (PermissionError, OSError):
                     pass  # file locked by another process, skip
     return removed
+
+
+# ─── supjav.com: MOUFLON live-relay downloader ─────────────────────────────
+# supjav streams its videos as a Cloudflare-protected HLS "live relay" on
+# growcdnssedge.com with the proprietary MOUFLON anti-hotlink scheme:
+#   - the media playlist only exposes a rolling window of ~3 segments;
+#   - the plain segment lines are 404 placeholders (media.mp4);
+#   - the ONLY working segment URLs are in "#EXT-X-MOUFLON:URI:" lines;
+#   - segment URLs embed an expiry token, so each segment must be fetched
+#     as soon as it appears in the playlist.
+# This downloader polls the playlist, downloads each new segment in real
+# time, and writes a local m3u8 that ffmpeg can mux into a single mp4.
+
+_MOUFLON_PSCH_RE = re.compile(r"#EXT-X-MOUFLON:PSCH:v2:(\S+)")
+_MOUFLON_URI_RE = re.compile(r"#EXT-X-MOUFLON:URI:(\S+)")
+_MOUFLON_MAP_RE = re.compile(r'#EXT-X-MAP:URI="([^"]+)"')
+_MOUFLON_MEDIA_SEQ_RE = re.compile(r"EXT-X-MEDIA-SEQUENCE:(\d+)")
+_MOUFLON_SEG_SEQ_RE = re.compile(r"_h264_(\d+)_")
+
+
+def _is_mouflon_url(url: str) -> bool:
+    return "growcdnssedge.com" in (url or "").lower() and ".m3u8" in (url or "").lower()
+
+
+def _http_get_bytes(url: str, headers: dict, timeout: int = 20) -> bytes:
+    """GET with UA+Referer (required by the supjav CDN)."""
+    import urllib.request
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def _pick_mouflon_quality(variants: list[tuple[str, str]], quality: str) -> str:
+    """variants: [(name like '240p'/'480p', url)]. Map the bot menu quality
+    (360/720/1080/max) to the closest available variant."""
+    if not variants:
+        return ""
+    heights = {int(n[:-1]): u for n, u in variants}
+    target = {"360": 360, "720": 720, "1080": 1080, "max": 99999}.get(quality, 720)
+    chosen = None
+    for h in sorted(heights):
+        if h <= target:
+            chosen = h
+    if chosen is None:
+        chosen = min(heights)
+    return heights[chosen]
+
+
+def _download_mouflon_relay(
+    master_or_media_url: str,
+    quality: str,
+    progress_callback,
+    extra_headers: dict | None,
+) -> str:
+    """Download a supjav MOUFLON live-relay video.
+
+    Records the relay from the CURRENT position for as long as new segments
+    keep arriving (or until ENDLIST / idle timeout / max record time).
+    """
+    import time
+    import tempfile
+    import threading
+    import shutil
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    headers = {
+        "User-Agent": (extra_headers or {}).get("User-Agent")
+        or _STREAM_HEADERS["User-Agent"],
+        "Referer": (extra_headers or {}).get("Referer") or "https://supjav.com/",
+        "Accept": "*/*",
+    }
+
+    max_record = int(os.getenv("SUPJAV_MAX_RECORD_SEC", "5400"))  # default 90 min
+    idle_stop = int(os.getenv("SUPJAV_IDLE_SEC", "25"))           # relay ended?
+
+    # ── resolve master → variant + pkey ────────────────────────────────────
+    if "/master/" in master_or_media_url:
+        master_text = _http_get_bytes(master_or_media_url, headers).decode()
+        pkeys = _MOUFLON_PSCH_RE.findall(master_text)
+        variants = re.findall(
+            r'#EXT-X-STREAM-INF:[^\n]*NAME="(\d+p)"\s*\n(\S+)', master_text
+        )
+        media_url = _pick_mouflon_quality(variants, quality)
+        if not media_url:
+            raise DownloadError("supjav: nessuna variante video trovata")
+    else:
+        # already a media playlist URL (possibly with ?psch=v2&pkey=...)
+        media_url = master_or_media_url
+        pkeys = []
+        m = re.search(r"pkey=(\S+)", master_or_media_url)
+        if m:
+            pkeys = [m.group(1)]
+        # senza pkey esplicito: risali al video id e ricava il master per i PSCH
+        if not pkeys:
+            vm = re.search(r"/b-hls-\d+/(\d+)/", master_or_media_url)
+            if vm:
+                vid = vm.group(1)
+                try:
+                    master_text = _http_get_bytes(
+                        f"https://edge-hls.growcdnssedge.com/hls/{vid}/master/{vid}.m3u8",
+                        headers).decode()
+                    pkeys = _MOUFLON_PSCH_RE.findall(master_text)
+                    _log.info("supjav: pkey derivati dal master (%d) per id %s", len(pkeys), vid)
+                except Exception as e:
+                    _log.warning("supjav: master derivato non accessibile: %s", e)
+        # pulisci eventuali psch/pkey già presenti nell'URL per evitare duplicati
+        media_url = re.sub(r"[?&]psch=v2&pkey=\S+", "", media_url)
+        media_url = re.sub(r"[?&]pkey=\S+", "", media_url)
+
+    def _media_url_with_pkey(pkey: str) -> str:
+        sep = "&" if "?" in media_url else "?"
+        return f"{media_url}{sep}psch=v2&pkey={pkey}"
+
+    # ── poll loop: collect + download new segments in real time ────────────
+    tmpdir = tempfile.mkdtemp(prefix="supjav_")
+    segments: dict[int, tuple[str, str]] = {}  # seq -> (url, local file)
+    init_url: str | None = None
+    init_file: str | None = None
+    pkey_idx = 0
+    quiet_since: float | None = None
+    start = time.time()
+    dl_lock = threading.Lock()
+    downloaded_bytes = 0
+    speed_win = []
+
+    try:
+        while True:
+            if time.time() - start > max_record:
+                _log.info("supjav: max record time raggiunto (%ds)", max_record)
+                break
+
+            # fetch media playlist (rotate pkey if it stops leaking URIs)
+            text = ""
+            for attempt in range(len(pkeys) + 1):
+                pk = pkeys[pkey_idx % len(pkeys)] if pkeys else ""
+                try:
+                    text = _http_get_bytes(_media_url_with_pkey(pk), headers).decode()
+                except Exception as e:
+                    _log.warning("supjav: fetch media fallito (%s), pkey %s", e, pk)
+                    text = ""
+                if _MOUFLON_URI_RE.search(text):
+                    break
+                pkey_idx += 1
+                if not pkeys:
+                    break
+            if not _MOUFLON_URI_RE.search(text):
+                # pkey rotation esaurita
+                if not text:
+                    break
+                _log.warning("supjav: playlist senza URI MOUFLON, pkey ruotate")
+
+            # init segment
+            m = _MOUFLON_MAP_RE.search(text)
+            if m:
+                init_url = m.group(1)
+            if init_url and init_file is None:
+                init_file = os.path.join(tmpdir, "init.mp4")
+                data = _http_get_bytes(init_url, headers)
+                with open(init_file, "wb") as f:
+                    f.write(data)
+                downloaded_bytes += len(data)
+                if progress_callback:
+                    progress_callback(downloaded_bytes / 1048576, 0, 0, None)
+
+            # new segments
+            new_uris = []
+            for uri in _MOUFLON_URI_RE.findall(text):
+                mm = _MOUFLON_SEG_SEQ_RE.search(uri)
+                seq = int(mm.group(1)) if mm else len(segments) + len(new_uris)
+                if seq not in segments:
+                    segments[seq] = (uri, "")
+                    new_uris.append((seq, uri))
+
+            if new_uris:
+                quiet_since = None
+                with ThreadPoolExecutor(max_workers=6) as ex:
+                    futs = {
+                        ex.submit(
+                            _http_get_bytes, uri, headers,
+                        ): seq for seq, uri in new_uris
+                    }
+                    for fut in as_completed(futs):
+                        seq = futs[fut]
+                        try:
+                            data = fut.result()
+                        except Exception as e:
+                            _log.warning("supjav: segmento %s fallito: %s", seq, e)
+                            continue
+                        fname = os.path.join(tmpdir, f"seg_{seq:08d}.mp4")
+                        with open(fname, "wb") as f:
+                            f.write(data)
+                        with dl_lock:
+                            segments[seq] = (segments[seq][0], fname)
+                            downloaded_bytes += len(data)
+                            speed_win.append((time.time(), len(data)))
+                if progress_callback:
+                    now = time.time()
+                    speed_win[:] = [(t, b) for t, b in speed_win if now - t <= 5]
+                    speed = (
+                        sum(b for _, b in speed_win) / 5 / 1048576
+                        if speed_win else 0
+                    )
+                    progress_callback(downloaded_bytes / 1048576, 0, speed, None)
+            else:
+                if quiet_since is None:
+                    quiet_since = time.time()
+                elif time.time() - quiet_since > idle_stop:
+                    _log.info("supjav: relay terminato (nessun segmento per %ds)", idle_stop)
+                    break
+
+            if "#EXT-X-ENDLIST" in text:
+                _log.info("supjav: ENDLIST trovato")
+                break
+
+            time.sleep(3)
+
+        if not segments or not init_file:
+            raise DownloadError("supjav: nessun segmento scaricato (relay vuoto?)")
+
+        # ── mux: local m3u8 (init + segments reali scaricati) + ffmpeg ─────
+        local_m3u8 = os.path.join(tmpdir, "playlist.m3u8")
+        lines = ["#EXTM3U", "#EXT-X-VERSION:6", "#EXT-X-TARGETDURATION:4"]
+        lines.append(f'#EXT-X-MAP:URI="{init_file}"')
+        for seq in sorted(segments):
+            fname = segments[seq][1]
+            if not fname:
+                continue
+            lines.append("#EXTINF:2.0,")
+            lines.append(fname)
+        lines.append("#EXT-X-ENDLIST")
+        with open(local_m3u8, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+        vid_m = re.search(r"/(\d+)/(?:\d+_)?(?:\d+p\.m3u8|.*)", media_url)
+        vid_label = f"_{vid_m.group(1)}" if vid_m else ""
+        out_base = os.path.join("downloads", f"supjav{vid_label}_{int(time.time())}")
+        raw_out = out_base + ".mp4"
+        os.makedirs("downloads", exist_ok=True)
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error",
+                "-protocol_whitelist", "file,http,https,tcp,tls,crypto,data",
+                "-i", local_m3u8,
+                "-c", "copy", "-movflags", "+faststart",
+                raw_out,
+            ],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0 or not os.path.exists(raw_out):
+            _log.error("supjav: ffmpeg fallito: %s", result.stderr[-400:])
+            raise DownloadError(f"supjav: merge ffmpeg fallito: {result.stderr[-200:]}")
+        _log.info("supjav: video ok %s (%d segments)", raw_out, len(segments))
+        return raw_out
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

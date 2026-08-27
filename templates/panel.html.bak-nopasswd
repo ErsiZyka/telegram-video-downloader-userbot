@@ -205,9 +205,6 @@
 
       <div class="stats" id="stats"></div>
 
-      <div class="section-title">🚀 I tuoi script</div>
-      <div class="dockers" id="scriptcards"><div class="empty">Caricamento script…</div></div>
-
       <div class="section-title">🐳 Container Docker</div>
       <table class="compact" style="min-width:0;">
         <tbody id="dockertbody">
@@ -279,7 +276,7 @@
 
 <script>
 let ws=null, logPaused=false, logEl=null;
-let procs=[], docker=[], scripts=[];
+let procs=[], docker=[];
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -313,14 +310,14 @@ async function api(path, opts={}) {
 let lastRefresh=0;
 async function refresh() {
   const d = await api('/api/status'); if (!d) return;
-  procs=d.procs||[]; docker=d.docker||[]; scripts=d.scripts||[];
+  procs=d.procs||[]; docker=d.docker||[];
   $('hostname').textContent = location.host;
   const b=$('botpill');
   if (d.bot.active) { b.className='pill on'; $('botpilltxt').textContent='bot attivo'; }
   else { b.className='pill off'; $('botpilltxt').textContent='bot fermo'; }
   $('latpill').textContent='aggiornato '+ (new Date().toLocaleTimeString('it-IT'));
   renderStats(d.sys);
-  renderScripts(); renderDocker(); renderProcs();
+  renderDocker(); renderProcs();
 }
 
 function renderStats(s){
@@ -337,20 +334,6 @@ function renderStats(s){
       <div class="bar ${diskUse>85?'warn':''}"><i style="width:${diskUse}%"></i></div>
       <div class="sub">${s.disk? (s.disk[3]||'')+' usati':''}</div></div>
     <div class="stat"><div class="label">Uptime <span class="ic">⏱</span></div><div class="value" style="font-size:15px;">${esc(up)}</div><div class="sub">${s.time||''}</div></div>`;
-}
-
-function renderScripts(){
-  $('scriptcards').innerHTML = scripts.length ? scripts.map(s=>`
-    <div class="dcard">
-      <div class="top"><div class="ic">${esc(s.icon||'📜')}</div>
-        <div style="min-width:0"><b>${esc(s.name)}</b><small>${esc(s.description||s.path||s.service)}</small></div></div>
-      <div class="st"><span class="tag">${s.service?(s.active?'● Attivo':'○ Fermato'):'◌ Da configurare'}</span> <span class="mono">${esc(s.service||s.path)}</span></div>
-      <div class="btnrow">${s.service ? `
-        <button class="btn sm ok" onclick="scriptAct('start','${esc(s.id)}')">▶ Avvia</button>
-        <button class="btn sm" onclick="scriptAct('restart','${esc(s.id)}')">↻ Riavvia</button>
-        <button class="btn sm danger" onclick="scriptAct('stop','${esc(s.id)}')">■ Ferma</button>` : '<span class="hint">Visibile automaticamente</span>'}
-      </div>
-    </div>`).join('') : '<div class="empty">Nessuno script registrato</div>';
 }
 
 function renderDocker(){
@@ -394,10 +377,6 @@ async function botAct(a){
 async function dockerAct(a,name){
   const r = await api('/api/docker',{method:'POST',body:JSON.stringify({action:a,name})});
   if (r) toast('Docker '+a+' '+name, r.code===0?'ok':'err'); refresh();
-}
-async function scriptAct(a,id){
-  const r = await api('/api/script',{method:'POST',body:JSON.stringify({action:a,id})});
-  if (r) { toast('Script '+a, r.code===0?'ok':'err'); refresh(); setTimeout(refresh,1200); }
 }
 async function killProc(pid, force){
   confirmBox(force?'Uccidere il processo (forzato)?':'Terminare il processo?',

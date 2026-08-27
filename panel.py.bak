@@ -15,7 +15,6 @@ import shlex
 import subprocess
 import time
 from collections import deque
-from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -26,7 +25,6 @@ PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "1611")
 BOT_SERVICE = os.getenv("PANEL_BOT_SERVICE", "videobot")
 LOG_FILES = os.getenv("PANEL_LOG_FILES", "data/bot.log,/var/log/syslog").split(",")
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS_DIR = Path(os.getenv("PANEL_SCRIPTS_DIR", "/home/ersi/condivisa/server_scripts"))
 
 app = FastAPI(title="ServerPanel")
 app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
@@ -37,8 +35,7 @@ _SESSIONS: set[str] = set()
 
 
 def _check_auth(request: Request) -> bool:
-    # Protezione rimossa: il pannello è ad uso personale su LAN/Tailscale.
-    return True
+    return request.cookies.get("panel_auth") in _SESSIONS
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -60,66 +57,6 @@ def _sh(cmd: str, timeout: int = 30) -> dict:
 def _bot_status() -> dict:
     r = _run(["systemctl", "is-active", BOT_SERVICE], timeout=10)
     return {"service": BOT_SERVICE, "active": r.get("out", "").strip() == "active"}
-
-
-def _script_registry() -> list[dict]:
-    """Read the centrally-managed scripts registry; malformed entries are ignored."""
-    try:
-        data = json.loads((SCRIPTS_DIR / "scripts.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    entries = data.get("scripts", [])
-    if not isinstance(entries, list):
-        return []
-    required = ("id", "name", "service")
-    return [entry for entry in entries if isinstance(entry, dict)
-            and all(isinstance(entry.get(key), str) and entry[key] for key in required)]
-
-
-def _discovered_scripts(known_ids: set[str]) -> list[dict]:
-    """Show every project/script placed in SCRIPTS_DIR, even before it has a service."""
-    try:
-        children = sorted(SCRIPTS_DIR.iterdir(), key=lambda path: path.name.lower())
-    except OSError:
-        return []
-
-    scripts = []
-    for child in children:
-        if child.name in {"scripts.json", "README.md"} or child.name.startswith("."):
-            continue
-        is_project = child.is_dir()
-        is_script = child.is_file() and child.suffix.lower() in {".py", ".sh", ".js", ".ts"}
-        if not (is_project or is_script):
-            continue
-        script_id = child.name if is_project else child.stem
-        if script_id in known_ids:
-            continue
-        name = " ".join(part.capitalize() for part in script_id.replace("_", "-").split("-"))
-        scripts.append({
-            "id": script_id,
-            "name": name,
-            "description": "Da configurare",
-            "icon": "📁" if is_project else "📜",
-            "service": "",
-            "path": str(child),
-            "active": False,
-        })
-    return scripts
-
-
-def _managed_scripts() -> list[dict]:
-    scripts = []
-    for entry in _script_registry():
-        script = {key: entry.get(key, "") for key in
-                  ("id", "name", "description", "icon", "service", "path")}
-        result = _run(["systemctl", "is-active", script["service"]], timeout=10)
-        script["active"] = result.get("out", "").strip() == "active"
-        scripts.append(script)
-    return scripts + _discovered_scripts({script["id"] for script in scripts})
-
-
-def _find_managed_script(script_id: str) -> dict | None:
-    return next((entry for entry in _script_registry() if entry["id"] == script_id), None)
 
 
 def _sysinfo() -> dict:
@@ -223,30 +160,23 @@ async def _startup():
 # ── Routes ──────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    resp = FileResponse(PANEL_HTML)
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    resp.headers["Pragma"] = "no-cache"
-    resp.headers["Expires"] = "0"
-    return resp
+    return FileResponse(PANEL_HTML)
 
 
 @app.post("/api/login")
-async def login():
-    # Protezione rimossa: nessuna password richiesta, nessuna sessione né cookie.
-    return JSONResponse({"ok": True})
+async def login(request: Request):
+    body = await request.json()
+    if body.get("password") == PANEL_PASSWORD:
+        token = os.urandom(16).hex()
+        _SESSIONS.add(token)
+        resp = JSONResponse({"ok": True})
+        resp.set_cookie("panel_auth", token, httponly=True, samesite="strict")
+        return resp
+    await asyncio.sleep(0.8)  # rallenta i tentativi di brute-force
+    return JSONResponse({"ok": False}, status_code=401)
 
 
-@app.get("/api/session-token")
-async def session_token(request: Request):
-    """Restituisce il token di sessione (cookie panel_auth) se la richiesta è
-    autenticata; altrimenti {"token": null}. Usato dal web panel per
-    autenticare il WebSocket /ws/logs (il cookie è HttpOnly, non leggibile dal JS)."""
-    if not _check_auth(request):
-        return {"token": None}
-    return {"token": request.cookies.get("panel_auth")}
-
-
-@app.api_route("/api/logout", methods=["GET", "POST"])
+@app.get("/api/logout")
 async def logout(request: Request):
     token = request.cookies.get("panel_auth")
     if token:
@@ -265,7 +195,6 @@ async def status(request: Request):
         "bot": _bot_status(),
         "sys": _sysinfo(),
         "docker": _docker(),
-        "scripts": _managed_scripts(),
         "procs": _user_processes(),
     }
 
@@ -279,18 +208,6 @@ async def bot_action(request: Request):
     if action not in ("start", "stop", "restart"):
         return {"ok": False, "err": "bad action"}
     return _run(["sudo", "systemctl", action, BOT_SERVICE], timeout=20)
-
-
-@app.post("/api/script")
-async def script_action(request: Request):
-    body = await request.json()
-    action = body.get("action")
-    script = _find_managed_script(str(body.get("id", "")))
-    if action not in ("start", "stop", "restart"):
-        return {"ok": False, "err": "bad action"}
-    if not script:
-        return JSONResponse({"ok": False, "err": "unknown script"}, status_code=404)
-    return _run(["sudo", "systemctl", action, script["service"]], timeout=20)
 
 
 @app.post("/api/docker")
@@ -343,8 +260,7 @@ async def reboot(request: Request):
 @app.websocket("/ws/logs")
 async def ws_logs(websocket: WebSocket):
     await websocket.accept()
-    # Nessuna autenticazione sul WebSocket: il pannello è protetto solo dalla rete.
-    # Il nuovo client riceve subito la storia recente, poi solo le righe nuove
+    # il nuovo client riceve subito la storia recente, poi solo le righe nuove
     recent = list(_log_buffer)[-120:]
     if recent:
         await websocket.send_text("\n".join(recent))

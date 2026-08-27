@@ -55,16 +55,18 @@ class DownloadQueue:
                     pass
             self._items = items
 
-    def add(self, url: str, quality: str, title: str, headers: dict | None = None) -> int:
+    def add(self, url: str, quality: str, title: str, headers: dict | None = None, **extra) -> int:
         """Append an item. Returns its 1-based position in the queue.
 
         ``headers`` are the HTTP headers the CDN requires (anti-leech). Stored
         as an empty dict / omitted for sites that don't need them.
         """
-        self._items.append({
+        item = {
             "url": url, "quality": quality, "title": title, "ts": time.time(),
             "headers": headers or {},
-        })
+        }
+        item.update(extra)
+        self._items.append(item)
         self._save(self._items)
         return len(self._items)
 

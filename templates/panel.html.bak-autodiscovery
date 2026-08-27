@@ -344,11 +344,11 @@ function renderScripts(){
     <div class="dcard">
       <div class="top"><div class="ic">${esc(s.icon||'📜')}</div>
         <div style="min-width:0"><b>${esc(s.name)}</b><small>${esc(s.description||s.path||s.service)}</small></div></div>
-      <div class="st"><span class="tag">${s.service?(s.active?'● Attivo':'○ Fermato'):'◌ Da configurare'}</span> <span class="mono">${esc(s.service||s.path)}</span></div>
-      <div class="btnrow">${s.service ? `
+      <div class="st"><span class="tag">${s.active?'● Attivo':'○ Fermato'}</span> <span class="mono">${esc(s.service)}</span></div>
+      <div class="btnrow">
         <button class="btn sm ok" onclick="scriptAct('start','${esc(s.id)}')">▶ Avvia</button>
         <button class="btn sm" onclick="scriptAct('restart','${esc(s.id)}')">↻ Riavvia</button>
-        <button class="btn sm danger" onclick="scriptAct('stop','${esc(s.id)}')">■ Ferma</button>` : '<span class="hint">Visibile automaticamente</span>'}
+        <button class="btn sm danger" onclick="scriptAct('stop','${esc(s.id)}')">■ Ferma</button>
       </div>
     </div>`).join('') : '<div class="empty">Nessuno script registrato</div>';
 }

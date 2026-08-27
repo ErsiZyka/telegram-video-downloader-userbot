@@ -76,37 +76,6 @@ def _script_registry() -> list[dict]:
             and all(isinstance(entry.get(key), str) and entry[key] for key in required)]
 
 
-def _discovered_scripts(known_ids: set[str]) -> list[dict]:
-    """Show every project/script placed in SCRIPTS_DIR, even before it has a service."""
-    try:
-        children = sorted(SCRIPTS_DIR.iterdir(), key=lambda path: path.name.lower())
-    except OSError:
-        return []
-
-    scripts = []
-    for child in children:
-        if child.name in {"scripts.json", "README.md"} or child.name.startswith("."):
-            continue
-        is_project = child.is_dir()
-        is_script = child.is_file() and child.suffix.lower() in {".py", ".sh", ".js", ".ts"}
-        if not (is_project or is_script):
-            continue
-        script_id = child.name if is_project else child.stem
-        if script_id in known_ids:
-            continue
-        name = " ".join(part.capitalize() for part in script_id.replace("_", "-").split("-"))
-        scripts.append({
-            "id": script_id,
-            "name": name,
-            "description": "Da configurare",
-            "icon": "📁" if is_project else "📜",
-            "service": "",
-            "path": str(child),
-            "active": False,
-        })
-    return scripts
-
-
 def _managed_scripts() -> list[dict]:
     scripts = []
     for entry in _script_registry():
@@ -115,7 +84,7 @@ def _managed_scripts() -> list[dict]:
         result = _run(["systemctl", "is-active", script["service"]], timeout=10)
         script["active"] = result.get("out", "").strip() == "active"
         scripts.append(script)
-    return scripts + _discovered_scripts({script["id"] for script in scripts})
+    return scripts
 
 
 def _find_managed_script(script_id: str) -> dict | None:
