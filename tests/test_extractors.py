@@ -1,31 +1,48 @@
-from bot.extractors import get_extractor, VideoInfo
+from bot.extractors import VideoInfo, get_extractor
 from bot.extractors.altadefinizione import AltaDefinizioneExtractor
 from bot.extractors.base import BaseExtractor
 from bot.extractors.hentaiworld import HentaiWorldExtractor
+from bot.extractors.internetchicks import InternetchicksExtractor, _find_embeds
 from bot.extractors.porn4fans import Porn4FansExtractor, _resolve_direct_url
 from bot.extractors.streamingcommunity import StreamingCommunityExtractor
-from bot.extractors.surrit import SurritExtractor, _decode_packers, _pick_m3u8
+from bot.extractors.surrit import SurritExtractor, _pick_m3u8
 
 
 class TestCanHandle:
     def test_altadefinizione_matches(self):
-        assert AltaDefinizioneExtractor.can_handle("https://altadefinizione.hot/avventura/33821-x.html")
-        assert AltaDefinizioneExtractor.can_handle("https://altadefinizione.live/watch/123")
+        assert AltaDefinizioneExtractor.can_handle(
+            "https://altadefinizione.hot/avventura/33821-x.html"
+        )
+        assert AltaDefinizioneExtractor.can_handle(
+            "https://altadefinizione.live/watch/123"
+        )
 
     def test_altadefinizione_no_match(self):
         assert not AltaDefinizioneExtractor.can_handle("https://youtube.com/watch?v=x")
-        assert not AltaDefinizioneExtractor.can_handle("https://streamingcommunity.pizza/it/watch/60266")
+        assert not AltaDefinizioneExtractor.can_handle(
+            "https://streamingcommunity.pizza/it/watch/60266"
+        )
 
     def test_streamingcommunity_matches(self):
-        assert StreamingCommunityExtractor.can_handle("https://streamingcommunityz.pizza/it/watch/60266")
-        assert StreamingCommunityExtractor.can_handle("https://streamingcommunity.art/it/watch/123")
+        assert StreamingCommunityExtractor.can_handle(
+            "https://streamingcommunityz.pizza/it/watch/60266"
+        )
+        assert StreamingCommunityExtractor.can_handle(
+            "https://streamingcommunity.art/it/watch/123"
+        )
 
     def test_streamingcommunity_no_match(self):
-        assert not StreamingCommunityExtractor.can_handle("https://youtube.com/watch?v=x")
-        assert not StreamingCommunityExtractor.can_handle("https://altadefinizione.hot/x")
+        assert not StreamingCommunityExtractor.can_handle(
+            "https://youtube.com/watch?v=x"
+        )
+        assert not StreamingCommunityExtractor.can_handle(
+            "https://altadefinizione.hot/x"
+        )
 
     def test_hentaiworld_matches(self):
-        assert HentaiWorldExtractor.can_handle("https://www.hentaiworld.me/watch/furachi-episode-2")
+        assert HentaiWorldExtractor.can_handle(
+            "https://www.hentaiworld.me/watch/furachi-episode-2"
+        )
         assert HentaiWorldExtractor.can_handle("https://hentaiworld.me/watch/abc")
 
     def test_hentaiworld_no_match(self):
@@ -36,7 +53,8 @@ class TestCanHandle:
         assert Porn4FansExtractor.can_handle("https://porn4fans.com/video/988/x/")
         assert Porn4FansExtractor.can_handle("HTTPS://EN.PORN4FANS.COM/x")
         assert Porn4FansExtractor.can_handle(
-            "https://shareanynudes.com/video/tanababyxo-x/")
+            "https://shareanynudes.com/video/tanababyxo-x/"
+        )
 
     def test_porn4fans_no_match(self):
         assert not Porn4FansExtractor.can_handle("https://youtube.com/watch?v=x")
@@ -49,6 +67,25 @@ class TestCanHandle:
     def test_surrit_no_match(self):
         assert not SurritExtractor.can_handle("https://youtube.com/watch?v=x")
         assert not SurritExtractor.can_handle("https://porn4fans.com/video/1/x/")
+
+    def test_internetchicks_matches(self):
+        assert InternetchicksExtractor.can_handle(
+            "https://internetchicks.com/gattouz0-x/")
+
+    def test_internetchicks_no_match(self):
+        assert not InternetchicksExtractor.can_handle("https://youtube.com/watch?v=x")
+
+    def test_find_embeds_prefers_streamtape(self):
+        html = (
+            "<button onclick=\"playEmbed('https://voe.sx/e/aa');\">P1</button>"
+            "<button onclick=\"playEmbed('https://streamtape.com/e/bb');\">P2</button>"
+            "<button onclick=\"playEmbed('https://voe.sx/e/aa');\">P3</button>"
+        )
+        embeds = _find_embeds(html)
+        assert embeds == ["https://streamtape.com/e/bb", "https://voe.sx/e/aa"]
+
+    def test_find_embeds_none(self):
+        assert _find_embeds("<html><body>ciao</body></html>") == []
 
     def test_case_insensitive(self):
         assert AltaDefinizioneExtractor.can_handle("HTTPS://Altadefinizione.HOT/x")
@@ -97,7 +134,9 @@ class TestVideoInfo:
         assert v.headers == {}
 
     def test_headers_set(self):
-        v = VideoInfo(url="https://x/a.m3u8", title="t", headers={"Referer": "https://y/"})
+        v = VideoInfo(
+            url="https://x/a.m3u8", title="t", headers={"Referer": "https://y/"}
+        )
         assert v.headers == {"Referer": "https://y/"}
 
 
@@ -157,7 +196,9 @@ class TestResolveDirectUrl:
                 "https://shareanynudes.com/get_file/3/x/4000/4084/4084_720p.mp4/?v-acctoken=t",
                 "https://shareanynudes.com/",
             )
-        assert result.startswith("https://sn1.nudes365.com/videos/4000/4084/4084_720p.mp4?")
+        assert result.startswith(
+            "https://sn1.nudes365.com/videos/4000/4084/4084_720p.mp4?"
+        )
         assert "time=1788002650" in result
         assert "file=" not in result
         assert "cv3=8a1256d27bb6bc95f187ddd6544f12f8" in result

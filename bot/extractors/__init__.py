@@ -15,6 +15,7 @@ import os
 from bot.extractors.base import BaseExtractor, PlaywrightVideoExtractor, VideoInfo
 from bot.extractors.beeg import BeegExtractor
 from bot.extractors.hentaiworld import HentaiWorldExtractor
+from bot.extractors.internetchicks import InternetchicksExtractor
 from bot.extractors.porn4fans import Porn4FansExtractor
 from bot.extractors.surrit import SurritExtractor
 from bot.extractors.tube8 import Tube8Extractor
@@ -34,6 +35,7 @@ _EXTRACTORS: list[type[BaseExtractor]] = [
     BeegExtractor,
     Porn4FansExtractor,
     SurritExtractor,
+    InternetchicksExtractor,
 ]
 
 if _PLAYWRIGHT_AVAILABLE:

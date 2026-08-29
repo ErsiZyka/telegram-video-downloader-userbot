@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from telethon import events
 from telethon.errors import FloodWaitError
 from telethon.tl.types import (
+    Document,
     DocumentAttributeVideo,
     MessageMediaDocument,
     MessageMediaPhoto,
@@ -790,7 +791,7 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
         asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
 
     try:
-        if isinstance(media, MessageMediaDocument) and media.document is not None:
+        if isinstance(media, MessageMediaDocument) and isinstance(media.document, Document):
             with open(filepath, "wb") as f:
                 await download_file(client, media.document, f, progress)
         else:
@@ -1012,7 +1013,7 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
         asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
 
     try:
-        if isinstance(msg.media, MessageMediaDocument) and msg.media.document is not None:
+        if isinstance(msg.media, MessageMediaDocument) and isinstance(msg.media.document, Document):
             with open(filepath, "wb") as f:
                 await download_file(client, msg.media.document, f, progress)
         else:
