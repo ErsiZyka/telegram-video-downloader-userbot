@@ -5,34 +5,39 @@ user types the number -> bot acts. State is tracked per-user.
 Upload uses FastTelethon for parallel TCP connections (10-20 MB/s).
 """
 
-import re
-import os
 import asyncio
+import os
+import re
 import time as time_module
 from urllib.parse import urlparse
+
 from telethon import events
 from telethon.errors import FloodWaitError
-from telethon.tl.types import (DocumentAttributeVideo, PeerChannel,
-                               MessageMediaDocument, MessageMediaPhoto)
+from telethon.tl.types import (
+    DocumentAttributeVideo,
+    MessageMediaDocument,
+    MessageMediaPhoto,
+    PeerChannel,
+)
 
-from bot.whitelist import Whitelist
-from bot.extractors import get_extractor, get_universal_fallback
 from bot.downloader import (
-    extract_info,
-    download_video,
-    probe_video_metadata,
     DownloadError,
     ExtractError,
     VideoUnavailableError,
+    _is_blocked_error,
+    cleanup_orphan_files,
+    download_video,
+    extract_info,
+    format_eta,
     format_size,
     format_speed,
-    format_eta,
-    cleanup_orphan_files,
-    _is_blocked_error,
+    probe_video_metadata,
 )
+from bot.extractors import get_extractor, get_universal_fallback
+from bot.fasttelethon import download_file, upload_file
 from bot.history import DownloadHistory
-from bot.fasttelethon import upload_file, download_file
 from bot.queue import DownloadQueue
+from bot.whitelist import Whitelist
 
 URL_REGEX = r"(https?://[^\s]+)"
 
@@ -225,6 +230,8 @@ async def _safe_reply(event, text: str):
 
 
 async def _safe_delete(msg) -> None:
+    if msg is None:
+        return
     try:
         await msg.delete()
     except Exception as e:
@@ -372,13 +379,12 @@ async def download_and_upload(
             if _is_blocked_error(download_error or ""):
                 fallback = get_universal_fallback(url)
                 if fallback is not None:
-                    _log("Download bloccato dal CDN (%s): riestraggio via browser...",
-                         (download_error or "")[:90])
+                    _log(f"Download bloccato dal CDN ({(download_error or '')[:90]}): riestraggio via browser...")
                     await _safe_edit(status_msg,
                         "🌐 CDN blocca il download: riestrazione via browser...")
                     try:
                         finfo = await fallback.extract(url)
-                        _log("Fallback browser ok: %s", finfo.url[:80])
+                        _log(f"Fallback browser ok: {finfo.url[:80]}")
                         filepath = await loop.run_in_executor(
                             None, download_video, finfo.url, quality,
                             download_progress, 1, finfo.headers,
@@ -488,7 +494,21 @@ async def download_and_upload(
                 return "cancelled"
             except FloodWaitError as e:
                 _log(f"FloodWait upload: {e.seconds}s")
-                await asyncio.sleep(e.seconds)
+                await _safe_edit(
+                    status_msg,
+                    f"⏳ Telegram mi ha limitato l'upload per ~{max(1, round(e.seconds / 60))} min"
+                    f" ({e.seconds}s). Attendo e riprovo in automatico...",
+                )
+                # Attesa cancellabile: /stop interrompe subito invece di
+                # lasciare il bot sordo per minuti (era causa di "sembra rotto").
+                waited = 0
+                while waited < e.seconds:
+                    if _cancel_requested:
+                        _log("FloodWait upload interrotto da /stop")
+                        break
+                    step = min(5, e.seconds - waited)
+                    await asyncio.sleep(step)
+                    waited += step
             except Exception as e:
                 if _cancel_requested:
                     if os.path.exists(filepath):
@@ -690,7 +710,20 @@ async def _upload_existing(
             break
         except FloodWaitError as e:
             _log(f"FloodWait: {e.seconds}s")
-            await asyncio.sleep(e.seconds)
+            await _safe_edit(
+                status_msg,
+                f"⏳ Telegram mi ha limitato l'upload per ~{max(1, round(e.seconds / 60))} min"
+                f" ({e.seconds}s). Attendo e riprovo in automatico...",
+            )
+            # Attesa cancellabile: stessa logica del download_and_upload.
+            waited = 0
+            while waited < e.seconds:
+                if _cancel_requested:
+                    _log("FloodWait _upload_existing interrotto da /stop")
+                    break
+                step = min(5, e.seconds - waited)
+                await asyncio.sleep(step)
+                waited += step
         except Exception as e:
             upload_error = repr(e)
             _log(f"Upload tentativo {attempt} fallito: {upload_error}")
@@ -1084,7 +1117,7 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
             if uni_fallback is not None:
                 try:
                     finfo = await uni_fallback.extract(url)
-                    _log("Fallback universale ok dopo extractor dedicato: %s", finfo.url[:80])
+                    _log(f"Fallback universale ok dopo extractor dedicato: {finfo.url[:80]}")
                     await _safe_delete(status_msg)
                     await _send_quality_menu(event, user_id, finfo.url,
                                               finfo.title, finfo.headers)
@@ -1154,7 +1187,7 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
             await _safe_edit(status_msg, "🌐 Verifica disponibilità via browser...")
             try:
                 finfo = await fallback.extract(url)
-                _log("Risorsa servita al browser: %s", finfo.url[:80])
+                _log(f"Risorsa servita al browser: {finfo.url[:80]}")
                 await _safe_delete(status_msg)
                 await _send_quality_menu(event, user_id, finfo.url, finfo.title, finfo.headers)
             except Exception:
@@ -1168,11 +1201,11 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
         # universale Playwright (siti free-tube con extractor rotto/obsoleto).
         fallback = get_universal_fallback(url)
         if fallback is not None:
-            _log("yt-dlp fallito (%s): provo extractor universale", str(e)[:80])
+            _log(f"yt-dlp fallito ({str(e)[:80]}): provo extractor universale")
             await _safe_edit(status_msg, "🌐 Estrazione via browser (fallback)...")
             try:
                 finfo = await fallback.extract(url)
-                _log("Fallback universale ok: %s", finfo.url[:80])
+                _log(f"Fallback universale ok: {finfo.url[:80]}")
                 await _safe_delete(status_msg)
                 await _send_quality_menu(event, user_id, finfo.url, finfo.title, finfo.headers)
             except Exception as e2:
@@ -1460,6 +1493,23 @@ async def on_message(client, event, whitelist: Whitelist, channel_id: int, owner
 
     url = urls[0] if urls else None
     if url:
+        # Stesso link già in lavorazione o già in coda: niente ri-analisi
+        # (ogni risposta alimenta il rate-limit di Telegram e confonde l'utente).
+        queue = _get_queue()
+        if _current_item is not None and _current_item.get("url") == url:
+            _log(f"Link già in lavorazione, ignorato: {url}")
+            await _safe_reply(
+                event, "⏳ Questo link è già **in lavorazione**. Attendi il termine "
+                "(scrivi `/status` per lo stato)."
+            )
+            return
+        for it in queue.items:
+            if it.get("url") == url:
+                _log(f"Link già in coda, ignorato: {url}")
+                await _safe_reply(
+                    event, "📥 Questo link è **già in coda**. Scrivi `/queue` per vederla."
+                )
+                return
         _clear_pending(user_id)
         _log(f"Nuovo link da {user_id}: {url}")
         await _process_link(client, event, url, channel_id)
