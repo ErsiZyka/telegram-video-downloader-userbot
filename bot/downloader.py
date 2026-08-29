@@ -627,6 +627,13 @@ _MOUFLON_MAP_RE = re.compile(r'#EXT-X-MAP:URI="([^"]+)"')
 _MOUFLON_MEDIA_SEQ_RE = re.compile(r"EXT-X-MEDIA-SEQUENCE:(\d+)")
 _MOUFLON_SEG_SEQ_RE = re.compile(r"_h264_(\d+)_")
 
+# UA di riserva per i download MOUFLON quando l'item accodato non ha header
+# propri (es. coda ripresa dopo un riavvio senza headers salvati).
+_DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 def _is_mouflon_url(url: str) -> bool:
     return "growcdnssedge.com" in (url or "").lower() and ".m3u8" in (url or "").lower()
@@ -674,8 +681,7 @@ def _download_mouflon_relay(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     headers = {
-        "User-Agent": (extra_headers or {}).get("User-Agent")
-        or _STREAM_HEADERS["User-Agent"],
+        "User-Agent": (extra_headers or {}).get("User-Agent") or _DEFAULT_UA,
         "Referer": (extra_headers or {}).get("Referer") or "https://supjav.com/",
         "Accept": "*/*",
     }

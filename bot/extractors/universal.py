@@ -100,6 +100,11 @@ class UniversalPlaywrightExtractor(PlaywrightVideoExtractor):
         "youporn.com",
         "yourfreeporn.us",
         "yteenporn.com",
+        # Siti con extractor HTTP dedicato (surrit/porn4fans): il browser serve
+        # da rete di sicurezza se il markup cambia e l'estrattore fallisce.
+        "123av.org",
+        "missav.ws",
+        "porn4fans.com",
     )
     RENDER_WAIT = 12
     AFTER_CLICK_WAIT = 15

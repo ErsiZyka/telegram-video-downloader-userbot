@@ -757,7 +757,7 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
         asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
 
     try:
-        if isinstance(media, MessageMediaDocument):
+        if isinstance(media, MessageMediaDocument) and media.document is not None:
             with open(filepath, "wb") as f:
                 await download_file(client, media.document, f, progress)
         else:
@@ -979,7 +979,7 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
         asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
 
     try:
-        if isinstance(msg.media, MessageMediaDocument):
+        if isinstance(msg.media, MessageMediaDocument) and msg.media.document is not None:
             with open(filepath, "wb") as f:
                 await download_file(client, msg.media.document, f, progress)
         else:
@@ -1067,15 +1067,30 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
     # headers the CDN requires.
     extractor = get_extractor(url)
     if extractor is not None:
-        status_msg = await _safe_reply(event, "🌐 Estrazione video via browser...")
+        status_msg = await _safe_reply(event, "🌐 Estrazione video in corso...")
         try:
-            loop = asyncio.get_running_loop()
-            info = await extractor.extract(url)
+            async with _extract_lock:
+                info = await extractor.extract(url)
             _log(f"Extractor ok: {info.url}")
             await _safe_delete(status_msg)
             await _send_quality_menu(event, user_id, info.url, info.title, info.headers)
         except Exception as e:
-            _log(f"Extractor fallito: {e!r}")
+            name = getattr(extractor, "__class__", type(extractor)).__name__
+            _log(f"Extractor {name} fallito: {e!r}")
+            # L'estrattore dedicato può fallire (markup cambiato, token diverso,
+            # pagina bloccata): prima di arrendersi provo il fallback universale
+            # Playwright, che cattura qualunque stream il sito serva al browser.
+            uni_fallback = get_universal_fallback(url)
+            if uni_fallback is not None:
+                try:
+                    finfo = await uni_fallback.extract(url)
+                    _log("Fallback universale ok dopo extractor dedicato: %s", finfo.url[:80])
+                    await _safe_delete(status_msg)
+                    await _send_quality_menu(event, user_id, finfo.url,
+                                              finfo.title, finfo.headers)
+                    return
+                except Exception as e2:
+                    _log(f"Anche il fallback universale è fallito: {e2!r}")
             await _safe_edit(status_msg, f"❌ Estrazione fallita: {e}")
         return
 
@@ -1355,12 +1370,28 @@ async def _process_batch(client, event, urls: list[str], channel_id: int) -> Non
             # Extractors dedicati (Playwright) hanno priorità su yt-dlp anche nel batch
             extractor = get_extractor(url)
             if extractor is not None:
-                async with _extract_lock:
-                    finfo = await extractor.extract(url)
-                items.append({"url": finfo.url, "title": finfo.title or "Video",
-                              "headers": finfo.headers or {}})
-                await _safe_edit(status_msg, f"🔍 Analisi batch ({i}/{len(urls)}): {items[-1]['title'][:50]}")
-                continue
+                try:
+                    async with _extract_lock:
+                        finfo = await extractor.extract(url)
+                    items.append({"url": finfo.url, "title": finfo.title or "Video",
+                                  "headers": finfo.headers or {}})
+                    await _safe_edit(status_msg, f"🔍 Analisi batch ({i}/{len(urls)}): {items[-1]['title'][:50]}")
+                    continue
+                except Exception:
+                    # L'estrattore dedicato ha fallito (markup/token cambiati):
+                    # nel batch proviamo comunque il fallback universale browser.
+                    fallback = get_universal_fallback(url)
+                    if fallback is not None:
+                        try:
+                            finfo = await fallback.extract(url)
+                            items.append({"url": finfo.url, "title": finfo.title or "Video",
+                                          "headers": finfo.headers or {}})
+                            await _safe_edit(status_msg, f"🔍 Analisi batch ({i}/{len(urls)}): {items[-1]['title'][:50]}")
+                            continue
+                        except Exception as e2:
+                            _log(f"Batch: anche il fallback universale è fallito per {url}: {e2!r}")
+                    skipped.append(url)
+                    continue
             async with _extract_lock:
                 info = await loop.run_in_executor(None, extract_info, url)
             if isinstance(info, list):

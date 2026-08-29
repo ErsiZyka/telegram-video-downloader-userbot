@@ -10,9 +10,14 @@ streaming sites won't, until Playwright+Chromium are installed).
 
 from __future__ import annotations
 
-import shutil
+import os
 
 from bot.extractors.base import BaseExtractor, PlaywrightVideoExtractor, VideoInfo
+from bot.extractors.beeg import BeegExtractor
+from bot.extractors.hentaiworld import HentaiWorldExtractor
+from bot.extractors.porn4fans import Porn4FansExtractor
+from bot.extractors.surrit import SurritExtractor
+from bot.extractors.tube8 import Tube8Extractor
 from bot.logging_config import get_logger
 
 _log = get_logger("extractor")
@@ -23,27 +28,24 @@ try:
 except ImportError:
     _PLAYWRIGHT_AVAILABLE = False
 
-# Order matters: more specific first.
-from bot.extractors.hentaiworld import HentaiWorldExtractor
-from bot.extractors.tube8 import Tube8Extractor
-from bot.extractors.beeg import BeegExtractor
-
 _EXTRACTORS: list[type[BaseExtractor]] = [
     HentaiWorldExtractor,
     Tube8Extractor,
     BeegExtractor,
+    Porn4FansExtractor,
+    SurritExtractor,
 ]
 
 if _PLAYWRIGHT_AVAILABLE:
     from bot.extractors.altadefinizione import AltaDefinizioneExtractor
     from bot.extractors.streamingcommunity import StreamingCommunityExtractor
-    from bot.extractors.xinindia import XinIndiaExtractor
     from bot.extractors.supjav import SupjavExtractor
+    from bot.extractors.xinindia import XinIndiaExtractor
     _EXTRACTORS.extend([
         AltaDefinizioneExtractor,
         StreamingCommunityExtractor,
-        XinIndiaExtractor,
         SupjavExtractor,
+        XinIndiaExtractor,
     ])
 
 
@@ -72,7 +74,6 @@ def is_playwright_ready() -> bool:
     # Heuristic: playwright stores browsers under MSYSTEM/playwright. We just
     # try a quick check via the sync API launch. That's expensive, so instead
     # check the common install path. If we can't tell, assume ready.
-    import os
     for env_name in ("PLAYWRIGHT_BROWSERS_PATH",):
         p = os.environ.get(env_name)
         if p and os.path.isdir(p):
@@ -84,10 +85,14 @@ def is_playwright_ready() -> bool:
         os.path.join(home, "AppData", "Local", "ms-playwright"),
         os.path.join(home, ".cache", "playwright"),
     ):
-        if os.path.isdir(candidate) and any(
-            os.path.isdir(os.path.join(candidate, d))
-            for d in os.listdir(candidate) if "chromium" in d.lower()
-        ):
+        if not os.path.isdir(candidate):
+            continue
+        try:
+            entries = os.listdir(candidate)
+        except OSError:
+            continue
+        if any(os.path.isdir(os.path.join(candidate, d)) and "chromium" in d.lower()
+               for d in entries):
             return True
     # Couldn't confirm a browser install; be optimistic so we still attempt
     # extraction (the launch will raise a clear error if missing).

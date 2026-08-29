@@ -1,0 +1,32 @@
+{
+  "rules": {
+    "python-dynamic": {
+      "disable": [
+        "no-boolean-in-except",
+        "no-identity-operator-on-literals",
+        "unchecked-throwing-call-python",
+        "no-ellipsis-body"
+      ]
+    },
+    "pyright-dynamic": {
+      "disable": [
+        "reportAttributeAccessIssue",
+        "reportArgumentType",
+        "reportMissingImports",
+        "reportOptionalSubscript",
+        "reportOptionalIterable",
+        "reportGeneralTypeIssues",
+        "reportReturnType",
+        "reportCallIssue",
+        "Pyright:reportAttributeAccessIssue",
+        "Pyright:reportArgumentType",
+        "Pyright:reportMissingImports",
+        "Pyright:reportOptionalSubscript",
+        "Pyright:reportOptionalIterable",
+        "Pyright:reportGeneralTypeIssues",
+        "Pyright:reportReturnType",
+        "Pyright:reportCallIssue"
+      ]
+    }
+  }
+}
