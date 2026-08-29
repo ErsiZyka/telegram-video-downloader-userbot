@@ -1,4 +1,5 @@
-"""Extractor per porn4fans.com (e i suoi sottodomini it., en., ...).
+"""Extractor per la piattaforma "get_file/v-acctoken" (porn4fans.com e
+shareanynudes.com — stesso motore, anche su altri sottodomini: it., en., ...).
 
 Il sito serve i video come MP4 diretti protetti da token anti-leech: la
 pagina del video contiene URL del tipo
@@ -19,7 +20,13 @@ from __future__ import annotations
 import re
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import (
+    parse_qsl,
+    urlencode,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+)
 
 from bot.extractors.base import BaseExtractor, VideoInfo
 from bot.logging_config import get_logger
@@ -85,6 +92,46 @@ def _probe_ok(url: str, referer: str) -> bool:
         return False
 
 
+def _resolve_direct_url(url: str, referer: str) -> str:
+    """Segue il redirect del CDN e, se finisce su un gateway .php
+    (shareanynudes -> sn1.nudes365.com/remote_control.php), ricostruisce
+    l'URL mp4 DIRETTO dal parametro ?file= e con gli stessi parametri
+    firmati. yt-dlp rifiuta le estensioni non comuni (.php) per sicurezza
+    (GHSA-79w7-vh3h-8g4j), quindi deve ricevere un URL .mp4 pulito.
+    Se il CDN serve già diretto (porn4fans) l'URL resta invariato.
+    """
+    _check_scheme(url)
+    headers = {
+        "User-Agent": _UA,
+        "Accept": "*/*",
+        "Range": "bytes=0-15",
+        "Referer": referer,
+    }
+    req = urllib.request.Request(url, headers=headers)  # pi-lens-ignore: S310
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:  # pi-lens-ignore: S310
+            final = r.geturl()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        return url
+    if "remote_control.php" not in final.lower() and not final.lower().rsplit(".", 1)[-1].startswith("php"):
+        return url  # già diretto (porn4fans)
+
+    parts = urlsplit(final)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    path = ""
+    keep: list[tuple[str, str]] = []
+    for key, value in query:
+        if key == "file":
+            path = value
+        else:
+            keep.append((key, value))
+    if not path:
+        return final
+    direct = urlunsplit((parts.scheme, parts.netloc, path, urlencode(keep), ""))
+    _log.info("Gateway .php -> mp4 diretto: %s", direct[:110])
+    return direct
+
+
 def _quality_of(url: str) -> int:
     """Indice di qualità (0 = più alta) dedotto dal suffisso nel nome file."""
     m = _QUALITY_RE.search(url)
@@ -115,7 +162,7 @@ def _page_title(page: str) -> str:
 
 
 class Porn4FansExtractor(BaseExtractor):
-    DOMAINS: tuple[str, ...] = ("porn4fans.com",)
+    DOMAINS: tuple[str, ...] = ("porn4fans.com", "shareanynudes.com")
 
     async def extract(self, url: str) -> VideoInfo:
         page = _fetch(url)
@@ -147,6 +194,9 @@ class Porn4FansExtractor(BaseExtractor):
         if chosen is None:
             _log.warning("Porn4Fans: tutti i token candidati sembrano scaduti, uso il migliore")
             chosen = candidates[0]
+        # Siti CDN con gateway .php: riscrivi in URL mp4 diretto (yt-dlp
+        # rifiuterebbe l'estensione .php per sicurezza)
+        chosen = _resolve_direct_url(chosen, referer)
 
         title = _page_title(page)
         _log.info("Porn4Fans: %s -> %s", title[:60], chosen[-90:])

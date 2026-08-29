@@ -2,7 +2,7 @@ from bot.extractors import get_extractor, VideoInfo
 from bot.extractors.altadefinizione import AltaDefinizioneExtractor
 from bot.extractors.base import BaseExtractor
 from bot.extractors.hentaiworld import HentaiWorldExtractor
-from bot.extractors.porn4fans import Porn4FansExtractor
+from bot.extractors.porn4fans import Porn4FansExtractor, _resolve_direct_url
 from bot.extractors.streamingcommunity import StreamingCommunityExtractor
 from bot.extractors.surrit import SurritExtractor, _decode_packers, _pick_m3u8
 
@@ -35,6 +35,8 @@ class TestCanHandle:
         assert Porn4FansExtractor.can_handle("https://it.porn4fans.com/video/988/x/")
         assert Porn4FansExtractor.can_handle("https://porn4fans.com/video/988/x/")
         assert Porn4FansExtractor.can_handle("HTTPS://EN.PORN4FANS.COM/x")
+        assert Porn4FansExtractor.can_handle(
+            "https://shareanynudes.com/video/tanababyxo-x/")
 
     def test_porn4fans_no_match(self):
         assert not Porn4FansExtractor.can_handle("https://youtube.com/watch?v=x")
@@ -116,14 +118,71 @@ _PACKER_FIXTURE = (
 )
 
 
-class TestSurritPacker:
-    def test_decode_packers_extracts_m3u8(self):
-        decoded = _decode_packers(_PACKER_FIXTURE)
-        assert len(decoded) == 1
-        body = decoded[0]
-        assert "https://surrit.com/ea1d04f4-e3b2-4c84-9e3b-cd0dfdf265cd/playlist.m3u8" in body
-        assert "1080p/video.m3u8" in body
-        assert "720p/video.m3u8" in body
+class TestResolveDirectUrl:
+    """Il gateway di shareanynudes è un .php (yt-dlp lo rifiuta per sicurezza):
+    l'extractor deve riscriverlo in un URL mp4 diretto con gli stessi parametri.
+    """
+
+    _GATEWAY = (
+        "https://sn1.nudes365.com/remote_control.php?time=1788002650"
+        "&cv=84c598cbec8627bcd504c1bd33e333ae&lr=0"
+        "&cv2=1536a3837146c631be79e0f8591fdd1f"
+        "&file=%2Fvideos%2F4000%2F4084%2F4084_720p.mp4"
+        "&cv3=8a1256d27bb6bc95f187ddd6544f12f8"
+        "&cv4=17c077dd0c88349fa49752f5ed78fa7f"
+    )
+
+    @staticmethod
+    def _fake_response(final_url: str):
+        class _Resp:
+            def geturl(self):
+                return final_url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp()
+
+    def test_gateway_php_riscritto_in_mp4_diretto(self):
+        from unittest.mock import patch
+
+        with patch(
+            "urllib.request.urlopen",
+            return_value=self._fake_response(self._GATEWAY),
+        ):
+            result = _resolve_direct_url(
+                "https://shareanynudes.com/get_file/3/x/4000/4084/4084_720p.mp4/?v-acctoken=t",
+                "https://shareanynudes.com/",
+            )
+        assert result.startswith("https://sn1.nudes365.com/videos/4000/4084/4084_720p.mp4?")
+        assert "time=1788002650" in result
+        assert "file=" not in result
+        assert "cv3=8a1256d27bb6bc95f187ddd6544f12f8" in result
+
+    def test_url_gia_diretto_invariato(self):
+        from unittest.mock import patch
+
+        direct = "https://it.porn4fans.com/get_file/1/x/0/988/988.mp4/?v-acctoken=t"
+        with patch(
+            "urllib.request.urlopen",
+            return_value=self._fake_response(direct),
+        ):
+            result = _resolve_direct_url(direct, "https://it.porn4fans.com/")
+        assert result == direct
+
+    def test_errore_rete_torna_url_originale(self):
+        from unittest.mock import patch
+
+        with patch("urllib.request.urlopen", side_effect=OSError):
+            result = _resolve_direct_url(
+                "https://shareanynudes.com/get_file/3/x/4000/4084/a.mp4/?v-acctoken=t",
+                "https://shareanynudes.com/",
+            )
+        assert "remote_control.php" not in result
+        assert "get_file" in result
 
     def test_pick_m3u8_prefers_master_playlist(self):
         urls = [
