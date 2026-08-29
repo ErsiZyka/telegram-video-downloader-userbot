@@ -1,9 +1,20 @@
+import os
+import tempfile
+import time
+from unittest.mock import MagicMock, patch
+
 import pytest
 from bot.downloader import (
     QUALITY_FORMATS,
+    DownloadError,
+    ExtractError,
+    _resolve_downloaded_file,
+    check_dependencies,
+    download_video,
+    extract_info,
+    format_eta,
     format_size,
     format_speed,
-    format_eta,
 )
 
 
@@ -45,7 +56,7 @@ class TestFormatSize:
 
     def test_small_fraction(self):
         result = format_size(0.5)
-        assert "0.5 MB" == result
+        assert result == "0.5 MB"
 
 
 class TestFormatSpeed:
@@ -54,7 +65,7 @@ class TestFormatSpeed:
 
     def test_typical_speed(self):
         result = format_speed(12.5)
-        assert "12.5 MB/s" == result
+        assert result == "12.5 MB/s"
 
 
 class TestFormatEta:
@@ -77,10 +88,6 @@ class TestFormatEta:
 
     def test_none_eta(self):
         assert format_eta(None) == "..."
-
-
-from unittest.mock import patch, MagicMock
-from bot.downloader import extract_info, ExtractError
 
 
 class TestExtractInfo:
@@ -129,11 +136,6 @@ class TestExtractInfo:
             assert result == []
 
 
-import os
-from unittest.mock import patch, MagicMock, call
-from bot.downloader import download_video, DownloadError, check_dependencies
-
-
 class TestDownloadVideo:
     def test_download_success_returns_filepath(self):
         expected_path = "downloads" + os.sep + "Test Video.mp4"
@@ -145,15 +147,17 @@ class TestDownloadVideo:
         def progress_cb(downloaded, total, speed, eta):
             progress_calls.append((downloaded, total, speed, eta))
 
-        with patch("bot.downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
+        with (
+            patch("bot.downloader.yt_dlp.YoutubeDL") as mock_ydl_class,
+            patch("os.path.exists", return_value=True),
+        ):
             mock_ydl_class.return_value.__enter__.return_value = mock_ydl
-            with patch("os.path.exists", return_value=True):
-                result = download_video(
-                    "https://youtube.com/watch?v=test",
-                    quality="720",
-                    progress_callback=progress_cb,
-                )
-                assert result == expected_path
+            result = download_video(
+                "https://youtube.com/watch?v=test",
+                quality="720",
+                progress_callback=progress_cb,
+            )
+            assert result == expected_path
 
     def test_download_retry_on_failure(self):
         """After first 2 attempts fail, 3rd succeeds."""
@@ -165,27 +169,31 @@ class TestDownloadVideo:
             {"title": "video"},
         ]
 
-        with patch("bot.downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
+        with (
+            patch("bot.downloader.yt_dlp.YoutubeDL") as mock_ydl_class,
+            patch("os.path.exists", return_value=True),
+        ):
             mock_ydl_class.return_value.__enter__.return_value = mock_ydl
-            with patch("os.path.exists", return_value=True):
-                with patch("time.sleep") as mock_sleep:
-                    result = download_video(
-                        "https://test.url",
-                        quality="max",
-                        progress_callback=lambda *a: None,
-                    )
-                    assert mock_sleep.call_count == 2  # 2 backoff sleeps
-                    assert result is not None
+            with patch("time.sleep") as mock_sleep:
+                result = download_video(
+                    "https://test.url",
+                    quality="max",
+                    progress_callback=lambda *a: None,
+                )
+                assert mock_sleep.call_count == 2  # 2 backoff sleeps
+                assert result is not None
 
     def test_download_fails_after_all_retries(self):
         mock_ydl = MagicMock()
         mock_ydl.prepare_filename.return_value = "downloads/video.mp4"
         mock_ydl.extract_info.side_effect = Exception("persistent error")
 
-        with patch("bot.downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
+        with (
+            patch("bot.downloader.yt_dlp.YoutubeDL") as mock_ydl_class,
+            patch("os.path.exists", return_value=True),
+        ):
             mock_ydl_class.return_value.__enter__.return_value = mock_ydl
-            with patch("os.path.exists", return_value=True):
-                with pytest.raises(DownloadError):
+            with pytest.raises(DownloadError):
                     download_video(
                         "https://test.url",
                         quality="360",
@@ -205,7 +213,7 @@ class TestDownloadVideo:
 
         with patch("bot.downloader.yt_dlp.YoutubeDL") as mock_ydl_class:
             instance = mock_ydl_class.return_value.__enter__.return_value
-            instance = mock_ydl
+            instance.extract_info.return_value = {"title": "video"}
 
             with patch("os.path.exists", return_value=True):
                 download_video(
@@ -259,3 +267,59 @@ class TestCheckDependencies:
             ok, msg = check_dependencies()
             assert ok
             assert msg == ""
+
+
+class TestResolveDownloadedFile:
+    """Riconcilia il percorso predetto da yt-dlp col file realmente scritto.
+
+    Bug risolto: i download di playlist (es. erothots con più entry) fanno
+    restituire a `prepare_filename()` un percorso inesistente (es. ".NA"),
+    e l'upload falliva con FileNotFoundError.
+    """
+
+    @staticmethod
+    def _touch(path: str, size: int) -> None:
+        with open(path, "wb") as f:
+            f.write(b"x" * size)
+
+    def test_predicted_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "video.mp4")
+            self._touch(p, 100)
+            assert _resolve_downloaded_file(p, d) == p
+
+    def test_merge_extension_from_base(self):
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "titolo.mkv")
+            self._touch(real, 100)
+            predicted = os.path.join(d, "titolo.ts")
+            assert _resolve_downloaded_file(predicted, d) == real
+
+    def test_unknown_video_extension_from_base(self):
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "clip.unknown_video")
+            self._touch(real, 100)
+            predicted = os.path.join(d, "clip.NA")
+            assert _resolve_downloaded_file(predicted, d) == real
+
+    def test_playlist_picks_largest_recent_file(self):
+        """Caso erothots: predetto .NA, su disco il video reale e la spazzatura."""
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "Tanababyxo - EroThots (1).mp4")
+            self._touch(real, 10_000_000)
+            junk = os.path.join(d, "Tanababyxo - EroThots (2).unknown_video")
+            self._touch(junk, 90_000)
+            self._touch(os.path.join(d, "playlist.mp4.part"), 999_999)
+            time.sleep(0.01)
+            predicted = os.path.join(d, "Tanababyxo - EroThots.NA")
+            assert _resolve_downloaded_file(predicted, d) == real
+
+    def test_ignores_old_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = os.path.join(d, "vecchio.mp4")
+            self._touch(old, 5_000_000)
+            os.utime(old, (time.time() - 7200, time.time() - 7200))
+            fresh = os.path.join(d, "nuovo.mp4")
+            self._touch(fresh, 1_000_000)
+            predicted = os.path.join(d, "nuovo.NOPE")
+            assert _resolve_downloaded_file(predicted, d) == fresh
