@@ -208,4 +208,5 @@ class Porn4FansExtractor(BaseExtractor):
                 "Referer": referer,
                 "Accept": "*/*",
             },
+            fixed_quality=True,
         )

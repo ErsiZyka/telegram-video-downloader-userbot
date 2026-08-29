@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import importlib.util
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -15,11 +17,7 @@ _log = get_logger("extractor")
 
 # Camoufox (Firefox anti-fingerprint): engine di secondo livello usato SOLO
 # quando la pagina mostra un challenge Cloudflare che Chromium non supera.
-try:
-    from camoufox.async_api import AsyncCamoufox  # noqa: F401
-    CAMOUFOX_AVAILABLE = True
-except ImportError:
-    CAMOUFOX_AVAILABLE = False
+CAMOUFOX_AVAILABLE = importlib.util.find_spec("camoufox") is not None
 
 # Marker del challenge Cloudflare nel titolo e nel corpo della pagina.
 _CF_TITLE_MARKERS = ("just a moment", "ci siamo quasi", "attention required")
@@ -34,10 +32,17 @@ _CF_BODY_MARKERS = _CF_TITLE_MARKERS + (
 class VideoInfo:
     """Result of extraction: a direct video URL (m3u8/mp4) + title, plus the
     HTTP headers the CDN requires to serve that URL (anti-leech protection:
-    streaming-community/vidxgo CDNs check sec-fetch-* and client hints)."""
+    streaming-community/vidxgo CDNs check sec-fetch-* and client hints).
+
+    ``fixed_quality``: True quando lo stream restituito ha UNA sola resa
+    (es. MP4 diretto o cattura del player): in quel caso il bot non mostra
+    il menu qualita (1-2-3-4) perche ogni scelta darebbe lo stesso file;
+    scarica direttamente alla qualita originale.
+    """
     url: str
     title: str
     headers: dict = field(default_factory=dict)
+    fixed_quality: bool = False
 
 
 class BaseExtractor(ABC):
@@ -77,9 +82,7 @@ def _is_stream_response(url: str, content_type: str) -> bool:
         return True
     if "dash+xml" in ct:
         return True
-    if _STREAM_EXT_RE.search(u):
-        return True
-    return False
+    return bool(_STREAM_EXT_RE.search(u))
 
 
 # Headers that streaming-community / vidxgo CDNs require to serve the m3u8.
@@ -208,8 +211,8 @@ class PlaywrightVideoExtractor(BaseExtractor):
                         body_snip = ((await page.inner_text("body")) or "")[:500].lower()
                         if any(k in body_snip for k in _CF_BODY_MARKERS):
                             cf_suspect = True
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        _log.debug("inner_text body fallito: %r", _e)
 
                 # Wait for the JS player to render, then click play inside the
                 # player frame. Use JS evaluate() to click (bypasses the
@@ -252,7 +255,8 @@ class PlaywrightVideoExtractor(BaseExtractor):
         challenge Cloudflare Turnstile che bloccano Chromium (es. xgroovy).
         Usa un display virtuale Xvfb interno, quindi funziona anche su server
         senza sessione grafica."""
-        from camoufox.async_api import AsyncCamoufox
+        camoufox_mod = importlib.import_module("camoufox.async_api")
+        AsyncCamoufox = camoufox_mod.AsyncCamoufox
 
         video_url: str | None = None
         video_headers: dict = {}
@@ -311,8 +315,8 @@ class PlaywrightVideoExtractor(BaseExtractor):
 
             try:
                 title = (await page.title()) or "Video"
-            except Exception:
-                pass
+            except Exception as _e:
+                _log.debug("page.title fallito: %r", _e)
 
             if video_url is None:
                 await asyncio.sleep(self.RENDER_WAIT)
@@ -344,7 +348,8 @@ class PlaywrightVideoExtractor(BaseExtractor):
             try:
                 if not frame.url:
                     continue
-            except Exception:
+            except Exception as _e:
+                _log.debug("frame.url non leggibile, salto: %r", _e)
                 continue
             for selector in (".btn-play", ".play-pause-center",
                              ".vjs-big-play-button", ".jw-display-icon-display",
@@ -361,5 +366,6 @@ class PlaywrightVideoExtractor(BaseExtractor):
                     )
                     if clicked:
                         return
-                except Exception:
+                except Exception as _e:
+                    _log.debug("selector %s non cliccabile: %r", selector, _e)
                     continue

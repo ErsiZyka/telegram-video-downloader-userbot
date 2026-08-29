@@ -40,7 +40,7 @@ from bot.history import DownloadHistory
 from bot.queue import DownloadQueue
 from bot.whitelist import Whitelist
 
-URL_REGEX = r"(https?://[^\s]+)"
+URL_REGEX = re.compile(r"(https?://[^\s]+)")
 
 # t.me post links: https://t.me/<username>/<msg_id> (public chat/channel)
 # or https://t.me/c/<id>/<msg_id> (private channel, numeric id without -100)
@@ -60,21 +60,35 @@ _history: DownloadHistory | None = None
 
 _queue: DownloadQueue | None = None
 _current_item: dict | None = None
-_progress_state: dict | None = None  # {phase, title, pct, received, total, speed, eta, ts}
+_progress_state: dict | None = (
+    None  # {phase, title, pct, received, total, speed, eta, ts}
+)
 _queue_worker_task: asyncio.Task | None = None
 _resume_event: asyncio.Event | None = None
 _resume_decision: str | None = None  # "yes" | "no"
 _extract_lock = asyncio.Lock()
 
 
-def _set_progress(phase: str, title: str | None, pct: float, received: float, total: float,
-                  speed: float = 0.0, eta: float = 0.0) -> None:
+def _set_progress(
+    phase: str,
+    title: str | None,
+    pct: float,
+    received: float,
+    total: float,
+    speed: float = 0.0,
+    eta: float = 0.0,
+) -> None:
     """Aggiorna lo stato live, anche quando il callback gira in un thread."""
     global _progress_state
     _progress_state = {
-        "phase": phase, "title": title, "pct": pct,
-        "received": received, "total": total,
-        "speed": speed, "eta": eta, "ts": time_module.time(),
+        "phase": phase,
+        "title": title,
+        "pct": pct,
+        "received": received,
+        "total": total,
+        "speed": speed,
+        "eta": eta,
+        "ts": time_module.time(),
     }
 
 
@@ -82,6 +96,7 @@ def _clear_progress() -> None:
     """Azzera lo stato quando l'item termina."""
     global _progress_state
     _progress_state = None
+
 
 QUALITY_CHOICES = {
     "1": ("360p", "360"),
@@ -119,7 +134,7 @@ def _log(msg: str) -> None:
         from bot.logging_config import bot_log
         bot_log(msg)
     except Exception:
-        pass
+        return
 
 
 def _set_pending(user_id: int, state: dict) -> None:
@@ -142,7 +157,7 @@ def _clear_pending(user_id: int) -> None:
 
 
 def extract_url(text: str) -> str | None:
-    match = re.search(URL_REGEX, text)
+    match = URL_REGEX.search(text)
     if not match:
         return None
     url = match.group(1)
@@ -161,7 +176,7 @@ def extract_all_urls(text: str) -> list[str]:
     if not text:
         return []
     urls: list[str] = []
-    for u in re.findall(URL_REGEX, text):
+    for u in URL_REGEX.findall(text):
         u = u.rstrip("\"'.,);:]")
         if u not in urls:
             urls.append(u)
@@ -196,6 +211,7 @@ def _build_caption(title: str, url: str = "") -> str:
 
 
 # ─── Safe message helpers (Telethon API + FloodWait mute) ───
+
 
 async def _safe_edit(msg, text: str) -> None:
     if msg is None:
@@ -241,26 +257,34 @@ async def _safe_delete(msg) -> None:
 
 # ─── Menu senders ───
 
-async def _send_quality_menu(event, user_id: int, url: str, title: str, headers: dict | None = None) -> None:
-    menu = await _safe_reply(event,
+
+async def _send_quality_menu(
+    event, user_id: int, url: str, title: str, headers: dict | None = None
+) -> None:
+    menu = await _safe_reply(
+        event,
         f"🎬 **{_escape_md(title)}**\n\n"
         f"Scrivi qui il NUMERO della qualità:\n"
-        f"1️⃣ 360p\n2️⃣ 720p\n3️⃣ 1080p\n🔥 4️⃣ MAX"
+        f"1️⃣ 360p\n2️⃣ 720p\n3️⃣ 1080p\n🔥 4️⃣ MAX",
     )
     if menu is None:
         _log("Menu qualità non inviato (FloodWait?)")
         return
-    _set_pending(user_id, {"type": "quality", "url": url, "title": title,
-                           "headers": headers or {}})
+    _set_pending(
+        user_id,
+        {"type": "quality", "url": url, "title": title, "headers": headers or {}},
+    )
     _log(f"Menu qualità inviato a {user_id}")
 
 
-async def _send_playlist_menu(event, user_id: int, videos: list, url: str, page: int = 0) -> None:
+async def _send_playlist_menu(
+    event, user_id: int, videos: list, url: str, page: int = 0
+) -> None:
     total = len(videos)
     page_size = 10
     total_pages = (total + page_size - 1) // page_size or 1
     start = page * page_size
-    page_videos = videos[start:start + page_size]
+    page_videos = videos[start : start + page_size]
 
     lines = [f"📋 **Playlist**: {total} video (pagina {page + 1}/{total_pages})\n"]
     lines.append("_Scrivi il NUMERO del video da scaricare:_\n")
@@ -276,15 +300,24 @@ async def _send_playlist_menu(event, user_id: int, videos: list, url: str, page:
     menu = await _safe_reply(event, "\n".join(lines))
     if menu is None:
         return
-    _set_pending(user_id, {"type": "playlist", "videos": videos, "url": url, "page": page})
+    _set_pending(
+        user_id, {"type": "playlist", "videos": videos, "url": url, "page": page}
+    )
     _log(f"Menu playlist inviato a {user_id} ({total} video)")
 
 
 # ─── Core: download_and_upload (FastTelethon parallel upload) ───
 
+
 async def download_and_upload(
-    client, status_msg, url: str, quality: str, title: str,
-    channel_id: int, owner_id: int, max_retries: int = 3,
+    client,
+    status_msg,
+    url: str,
+    quality: str,
+    title: str,
+    channel_id: int,
+    owner_id: int,
+    max_retries: int = 3,
     headers: dict | None = None,
 ) -> str:
     """Download then upload a video. Returns outcome: 'ok' | 'error' | 'cancelled'.
@@ -308,8 +341,15 @@ async def download_and_upload(
                 raise CancelDownload("stop")
             now = time_module.time()
             pct = (downloaded_mb / total_mb * 100) if total_mb > 0 else 0
-            _set_progress("download", title, pct, downloaded_mb, total_mb,
-                          speed_mbps, float(eta or 0))
+            _set_progress(
+                "download",
+                title,
+                pct,
+                downloaded_mb,
+                total_mb,
+                speed_mbps,
+                float(eta or 0),
+            )
             if now - last_progress < 3:
                 return
             last_progress = now
@@ -329,8 +369,10 @@ async def download_and_upload(
                 last_log_progress = now
                 tot_str = f"/{total_mb:.0f}MB" if total_mb > 0 else ""
                 eta_str = f" eta={int(eta)}s" if eta and int(eta) > 0 else ""
-                _log(f"Progress: {downloaded_mb:.0f}MB{tot_str} {pct:.0f}% "
-                     f"{format_speed(speed_mbps)}{eta_str}")
+                _log(
+                    f"Progress: {downloaded_mb:.0f}MB{tot_str} {pct:.0f}% "
+                    f"{format_speed(speed_mbps)}{eta_str}"
+                )
 
         filepath = None
         download_error = None
@@ -342,9 +384,17 @@ async def download_and_upload(
                 return "cancelled"
             try:
                 if attempt > 1:
-                    await _safe_edit(status_msg, f"⏳ Download (tentativo {attempt}/{max_retries})...")
+                    await _safe_edit(
+                        status_msg,
+                        f"⏳ Download (tentativo {attempt}/{max_retries})...",
+                    )
                 filepath = await loop.run_in_executor(
-                    None, download_video, url, quality, download_progress, 1,
+                    None,
+                    download_video,
+                    url,
+                    quality,
+                    download_progress,
+                    1,
                     headers,
                 )
                 _log(f"Download completato: {filepath}")
@@ -370,7 +420,7 @@ async def download_and_upload(
                 try:
                     _get_history().set_error(url, str(e), title)
                 except Exception:
-                    pass
+                    _log("history save fallito (ignorato)")
                 return "error"
 
         if filepath is None:
@@ -380,15 +430,24 @@ async def download_and_upload(
             if _is_blocked_error(download_error or ""):
                 fallback = get_universal_fallback(url)
                 if fallback is not None:
-                    _log(f"Download bloccato dal CDN ({(download_error or '')[:90]}): riestraggio via browser...")
-                    await _safe_edit(status_msg,
-                        "🌐 CDN blocca il download: riestrazione via browser...")
+                    _log(
+                        f"Download bloccato dal CDN ({(download_error or '')[:90]}): riestraggio via browser..."
+                    )
+                    await _safe_edit(
+                        status_msg,
+                        "🌐 CDN blocca il download: riestrazione via browser...",
+                    )
                     try:
                         finfo = await fallback.extract(url)
                         _log(f"Fallback browser ok: {finfo.url[:80]}")
                         filepath = await loop.run_in_executor(
-                            None, download_video, finfo.url, quality,
-                            download_progress, 1, finfo.headers,
+                            None,
+                            download_video,
+                            finfo.url,
+                            quality,
+                            download_progress,
+                            1,
+                            finfo.headers,
                         )
                         _log(f"Download completato dopo fallback browser: {filepath}")
                     except CancelDownload:
@@ -401,12 +460,16 @@ async def download_and_upload(
 
         if filepath is None:
             cleanup_orphan_files()
-            await _safe_edit(status_msg,
-                f"❌ Download fallito dopo {max_retries} tentativi.\nErrore: {download_error}")
+            await _safe_edit(
+                status_msg,
+                f"❌ Download fallito dopo {max_retries} tentativi.\nErrore: {download_error}",
+            )
             try:
-                _get_history().set_error(url, download_error or "download fallito", title)
+                _get_history().set_error(
+                    url, download_error or "download fallito", title
+                )
             except Exception:
-                pass
+                _log("history save fallito (ignorato)")
             return "error"
 
         file_size_bytes = os.path.getsize(filepath) if os.path.exists(filepath) else 0
@@ -416,8 +479,10 @@ async def download_and_upload(
         if file_size_gb > 2:
             if os.path.exists(filepath):
                 os.remove(filepath)
-            await _safe_edit(status_msg,
-                f"❌ File troppo grande ({file_size_gb:.1f} GB). Limite Telegram: 2GB")
+            await _safe_edit(
+                status_msg,
+                f"❌ File troppo grande ({file_size_gb:.1f} GB). Limite Telegram: 2GB",
+            )
             return "error"
 
         # ─── Upload phase: FastTelethon parallel upload ───
@@ -440,11 +505,26 @@ async def download_and_upload(
             pct = (sent / total * 100) if total > 0 else 0
             delta_bytes = sent - tracker.prev_bytes
             delta_t = now - tracker.prev_ts if tracker.prev_ts else 0
-            speed_mbps = (delta_bytes / delta_t / 1024 / 1024) if delta_t > 0 and delta_bytes > 0 else 0
+            speed_mbps = (
+                (delta_bytes / delta_t / 1024 / 1024)
+                if delta_t > 0 and delta_bytes > 0
+                else 0
+            )
             remaining = total - sent
-            eta = remaining / (delta_bytes / delta_t) if delta_bytes > 0 and delta_t > 0 else 0
-            _set_progress("upload", title, pct, sent / (1024 * 1024),
-                          total / (1024 * 1024), speed_mbps, eta)
+            eta = (
+                remaining / (delta_bytes / delta_t)
+                if delta_bytes > 0 and delta_t > 0
+                else 0
+            )
+            _set_progress(
+                "upload",
+                title,
+                pct,
+                sent / (1024 * 1024),
+                total / (1024 * 1024),
+                speed_mbps,
+                eta,
+            )
             if now - last_upload_progress < 5:
                 return
             if now < _edit_muted_until:
@@ -454,7 +534,7 @@ async def download_and_upload(
             tracker.prev_ts = now
             text = (
                 f"✅ Download completato ({format_size(file_size_mb)})\n"
-                f"📤 Upload {format_size(sent/(1024*1024))} / {format_size(total/(1024*1024))} · {pct:.0f}%"
+                f"📤 Upload {format_size(sent / (1024 * 1024))} / {format_size(total / (1024 * 1024))} · {pct:.0f}%"
             )
             if speed_mbps > 0:
                 text += f"\n▫️ Velocità: {format_speed(speed_mbps)}"
@@ -462,8 +542,10 @@ async def download_and_upload(
                 text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
             await _safe_edit(status_msg, text)
 
-        await _safe_edit(status_msg,
-            f"✅ Download completato ({format_size(file_size_mb)})\n📤 Upload in corso (parallelo)...")
+        await _safe_edit(
+            status_msg,
+            f"✅ Download completato ({format_size(file_size_mb)})\n📤 Upload in corso (parallelo)...",
+        )
 
         # Probe real video metadata so Telegram shows it as a playable MP4
         # (with streaming + thumbnail) instead of a generic document.
@@ -475,12 +557,18 @@ async def download_and_upload(
             try:
                 tracker.prev_ts = time_module.time()
                 with open(filepath, "rb") as f:
-                    uploaded = await upload_file(client, f, progress_callback=upload_progress)
+                    uploaded = await upload_file(
+                        client, f, progress_callback=upload_progress
+                    )
                 await client.send_file(
-                    channel_id, file=uploaded, caption=caption,
-                    attributes=[DocumentAttributeVideo(
-                        duration=v_duration, w=v_w, h=v_h, supports_streaming=True
-                    )],
+                    channel_id,
+                    file=uploaded,
+                    caption=caption,
+                    attributes=[
+                        DocumentAttributeVideo(
+                            duration=v_duration, w=v_w, h=v_h, supports_streaming=True
+                        )
+                    ],
                 )
                 upload_success = True
                 _log("Upload completato con successo")
@@ -490,7 +578,7 @@ async def download_and_upload(
                     try:
                         os.remove(filepath)
                     except Exception:
-                        pass
+                        _log("cleanup file annullato fallito (ignorato)")
                 await _safe_edit(status_msg, "🛑 Upload annullato. File eliminato.")
                 return "cancelled"
             except FloodWaitError as e:
@@ -516,7 +604,7 @@ async def download_and_upload(
                         try:
                             os.remove(filepath)
                         except Exception:
-                            pass
+                            _log("cleanup file annullato fallito (ignorato)")
                     await _safe_edit(status_msg, "🛑 Upload annullato. File eliminato.")
                     return "cancelled"
                 upload_error = repr(e)
@@ -538,12 +626,14 @@ async def download_and_upload(
                 _log(f"history save failed: {e!r}")
             return "ok"
         else:
-            await _safe_edit(status_msg,
-                f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}")
+            await _safe_edit(
+                status_msg,
+                f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}",
+            )
             try:
                 _get_history().set_error(url, upload_error or "upload fallito", title)
             except Exception:
-                pass
+                _log("history save fallito (ignorato)")
             return "error"
 
     finally:
@@ -551,6 +641,7 @@ async def download_and_upload(
 
 
 # ─── Queue worker ───
+
 
 async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
     """Process the queue sequentially: peek -> download+upload -> remove.
@@ -580,28 +671,42 @@ async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
         try:
             try:
                 status_msg = await client.send_message(
-                    owner_id, f"⏳ Avvio download: **{_escape_md(title)}** [{quality}]..."
+                    owner_id,
+                    f"⏳ Avvio download: **{_escape_md(title)}** [{quality}]...",
                 )
             except FloodWaitError as e:
                 # Rate-limit Telegram sul solo messaggio di stato: attendere è
                 # obbligatorio, ma l'item NON deve fallire per questo. Attendi,
                 # riprova una volta e, se ancora bloccato, prosegui senza
                 # messaggio di stato (gli aggiornamenti restano nel log).
-                _log(f"FloodWait {e.seconds}s su 'Avvio download' per {url}: attendo...")
+                _log(
+                    f"FloodWait {e.seconds}s su 'Avvio download' per {url}: attendo..."
+                )
                 await asyncio.sleep(min(e.seconds + 3, 600))
                 try:
                     status_msg = await client.send_message(
-                        owner_id, f"⏳ Avvio download: **{_escape_md(title)}** [{quality}]..."
+                        owner_id,
+                        f"⏳ Avvio download: **{_escape_md(title)}** [{quality}]...",
                     )
                 except FloodWaitError as e2:
-                    _log(f"FloodWait persistente ({e2.seconds}s): proseguo senza status message")
+                    _log(
+                        f"FloodWait persistente ({e2.seconds}s): proseguo senza status message"
+                    )
                     status_msg = None
             kind = item.get("kind", "web")
             if kind == "saved":
-                await download_and_upload_saved(client, status_msg, item, channel_id, owner_id)
+                await download_and_upload_saved(
+                    client, status_msg, item, channel_id, owner_id
+                )
             else:
                 await download_and_upload(
-                    client, status_msg, url, quality, title, channel_id, owner_id,
+                    client,
+                    status_msg,
+                    url,
+                    quality,
+                    title,
+                    channel_id,
+                    owner_id,
                     headers=headers,
                 )
         except Exception as e:
@@ -630,15 +735,27 @@ async def start_queue_worker(client, channel_id: int, owner_id: int) -> None:
         # Truly orphan files (no queue items) -> safe to clean now.
         cleanup_orphan_files()
     else:
-        await client.send_message(owner_id,
-            f"▶️ Riprendo la coda ({len(queue.items)} item dal precedente avvio)...")
-    _queue_worker_task = asyncio.create_task(_queue_worker(client, channel_id, owner_id))
+        await client.send_message(
+            owner_id,
+            f"▶️ Riprendo la coda ({len(queue.items)} item dal precedente avvio)...",
+        )
+    _queue_worker_task = asyncio.create_task(
+        _queue_worker(client, channel_id, owner_id)
+    )
 
 
 # ─── Upload existing file (no re-download) ───
 
+
 async def _upload_existing(
-    client, event, status_msg, filepath: str, title: str, channel_id: int, url: str = "", max_retries: int = 2,
+    client,
+    event,
+    status_msg,
+    filepath: str,
+    title: str,
+    channel_id: int,
+    url: str = "",
+    max_retries: int = 2,
 ) -> None:
     if not os.path.exists(filepath):
         _clear_progress()
@@ -661,6 +778,7 @@ async def _upload_existing(
     class _UpTracker:
         prev_bytes: int = 0
         prev_ts: float = 0.0
+
     tracker = _UpTracker()
 
     async def upload_progress(sent: int, total: int):
@@ -669,11 +787,26 @@ async def _upload_existing(
         pct = (sent / total * 100) if total > 0 else 0
         delta_bytes = sent - tracker.prev_bytes
         delta_t = now - tracker.prev_ts if tracker.prev_ts else 0
-        speed_mbps = (delta_bytes / delta_t / 1024 / 1024) if delta_t > 0 and delta_bytes > 0 else 0
+        speed_mbps = (
+            (delta_bytes / delta_t / 1024 / 1024)
+            if delta_t > 0 and delta_bytes > 0
+            else 0
+        )
         remaining = total - sent
-        eta = remaining / (delta_bytes / delta_t) if delta_bytes > 0 and delta_t > 0 else 0
-        _set_progress("upload", title, pct, sent / (1024 * 1024),
-                      total / (1024 * 1024), speed_mbps, eta)
+        eta = (
+            remaining / (delta_bytes / delta_t)
+            if delta_bytes > 0 and delta_t > 0
+            else 0
+        )
+        _set_progress(
+            "upload",
+            title,
+            pct,
+            sent / (1024 * 1024),
+            total / (1024 * 1024),
+            speed_mbps,
+            eta,
+        )
         if now - last_progress < 5:
             return
         if now < _edit_muted_until:
@@ -681,30 +814,39 @@ async def _upload_existing(
         last_progress = now
         tracker.prev_bytes = sent
         tracker.prev_ts = now
-        text = f"📤 Upload {format_size(sent/(1024*1024))} / {format_size(total/(1024*1024))} · {pct:.0f}%"
+        text = f"📤 Upload {format_size(sent / (1024 * 1024))} / {format_size(total / (1024 * 1024))} · {pct:.0f}%"
         if speed_mbps > 0:
             text += f"\n▫️ Velocità: {format_speed(speed_mbps)}"
         if eta > 0:
             text += f"\n▫️ Tempo rimanente: {format_eta(eta)}"
         await _safe_edit(status_msg, text)
 
-    await _safe_edit(status_msg, f"📤 Upload in corso: **{_escape_md(title)}** ({format_size(file_size_mb)})...")
+    await _safe_edit(
+        status_msg,
+        f"📤 Upload in corso: **{_escape_md(title)}** ({format_size(file_size_mb)})...",
+    )
 
     # Probe real video metadata so Telegram shows it as a playable MP4
     # (with streaming + thumbnail) instead of a generic document.
     loop = asyncio.get_running_loop()
-    v_duration, v_w, v_h = await loop.run_in_executor(None, probe_video_metadata, filepath)
+    v_duration, v_w, v_h = await loop.run_in_executor(
+        None, probe_video_metadata, filepath
+    )
 
     for attempt in range(1, max_retries + 1):
         try:
             tracker.prev_ts = time_module.time()
             with open(filepath, "rb") as f:
-                uploaded = await upload_file(client, f, progress_callback=upload_progress)
+                uploaded = await upload_file(
+                    client, f, progress_callback=upload_progress
+                )
             send_kwargs = {"file": uploaded, "caption": caption}
             if v_duration or v_w or v_h:
-                send_kwargs["attributes"] = [DocumentAttributeVideo(
-                    duration=v_duration, w=v_w, h=v_h, supports_streaming=True
-                )]
+                send_kwargs["attributes"] = [
+                    DocumentAttributeVideo(
+                        duration=v_duration, w=v_w, h=v_h, supports_streaming=True
+                    )
+                ]
             await client.send_file(channel_id, **send_kwargs)
             upload_success = True
             _log("Upload esistente completato")
@@ -740,8 +882,10 @@ async def _upload_existing(
             _log(f"history save failed: {e!r}")
     else:
         _clear_progress()
-        await _safe_edit(status_msg,
-            f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}")
+        await _safe_edit(
+            status_msg,
+            f"❌ Upload fallito dopo {max_retries} tentativi.\nErrore: {upload_error}",
+        )
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
@@ -750,7 +894,7 @@ async def _upload_existing(
         try:
             _get_history().set_error(url, upload_error or "upload fallito", title)
         except Exception:
-            pass
+            _log("history save fallito (ignorato)")
 
 
 async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) -> None:
@@ -763,15 +907,24 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
     mime = getattr(msg_file, "mime_type", None) if msg_file else None
     if not fname:
         ext = {
-            "video/mp4": ".mp4", "video/quicktime": ".mov",
-            "video/x-matroska": ".mkv", "audio/mpeg": ".mp3",
-            "audio/ogg": ".ogg", "application/pdf": ".pdf",
-            "image/jpeg": ".jpg", "image/png": ".png",
+            "video/mp4": ".mp4",
+            "video/quicktime": ".mov",
+            "video/x-matroska": ".mkv",
+            "audio/mpeg": ".mp3",
+            "audio/ogg": ".ogg",
+            "application/pdf": ".pdf",
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
         }.get(mime or "", ".bin")
         fname = f"media_{msg.id}{ext}"
-    fname = re.sub(r"[^A-Za-z0-9._ -]", "_", fname).strip(" .")[:150] or f"media_{msg.id}.bin"
+    fname = (
+        re.sub(r"[^A-Za-z0-9._ -]", "_", fname).strip(" .")[:150]
+        or f"media_{msg.id}.bin"
+    )
     filepath = os.path.join("downloads", fname)
-    title = (msg.message or "").strip() or os.path.splitext(os.path.basename(filepath))[0]
+    title = (msg.message or "").strip() or os.path.splitext(os.path.basename(filepath))[
+        0
+    ]
     title = title[:80]
     os.makedirs("downloads", exist_ok=True)
     loop = asyncio.get_running_loop()
@@ -780,8 +933,15 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
     def progress(received: int, total: int):
         now = time_module.time()
         pct = received / total * 100 if total else 0
-        _set_progress("download", title, pct, received / (1024 * 1024),
-                      total / (1024 * 1024), 0.0, 0.0)
+        _set_progress(
+            "download",
+            title,
+            pct,
+            received / (1024 * 1024),
+            total / (1024 * 1024),
+            0.0,
+            0.0,
+        )
         if now - last_progress[0] < 3:
             return
         last_progress[0] = now
@@ -791,12 +951,15 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
         asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
 
     try:
-        if isinstance(media, MessageMediaDocument) and isinstance(media.document, Document):
+        if isinstance(media, MessageMediaDocument) and isinstance(
+            media.document, Document
+        ):
             with open(filepath, "wb") as f:
                 await download_file(client, media.document, f, progress)
         else:
-            downloaded = await client.download_media(msg, file=filepath,
-                                                     progress_callback=progress)
+            downloaded = await client.download_media(
+                msg, file=filepath, progress_callback=progress
+            )
             if downloaded:
                 filepath = downloaded
         if not os.path.exists(filepath):
@@ -808,7 +971,7 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
             if os.path.exists(filepath):
                 os.remove(filepath)
         except Exception:
-            pass
+            _log("cleanup media fallito (ignorato)")
         await _safe_edit(status_msg, f"❌ Download fallito: {e}")
         return
 
@@ -818,8 +981,11 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
         try:
             os.remove(filepath)
         except Exception:
-            pass
-        await _safe_edit(status_msg, f"❌ File troppo grande ({size_gb:.1f} GB). Limite Telegram: 2GB")
+            _log("cleanup media grande fallito (ignorato)")
+        await _safe_edit(
+            status_msg,
+            f"❌ File troppo grande ({size_gb:.1f} GB). Limite Telegram: 2GB",
+        )
         return
 
     if isinstance(media, MessageMediaPhoto):
@@ -837,7 +1003,7 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
             try:
                 os.remove(filepath)
             except Exception:
-                pass
+                _log("cleanup foto fallita (ignorata)")
             await _safe_edit(status_msg, f"❌ Upload foto fallito: {e}")
         return
 
@@ -853,11 +1019,15 @@ async def _process_forwarded_media(client, event, channel_id: int, msg=None) -> 
     await _download_and_upload_saved_media(client, status_msg, msg, channel_id)
 
 
-async def download_and_upload_saved(client, status_msg, item, channel_id, owner_id) -> str:
+async def download_and_upload_saved(
+    client, status_msg, item, channel_id, owner_id
+) -> str:
     """Recupera dai Messaggi Salvati e carica il media nel canale."""
     msg = await client.get_messages(item.get("peer", "me"), ids=item.get("msg_id"))
     if msg is None or getattr(msg, "media", None) is None:
-        await _safe_edit(status_msg, "❌ Messaggio non più disponibile nei Messaggi Salvati.")
+        await _safe_edit(
+            status_msg, "❌ Messaggio non più disponibile nei Messaggi Salvati."
+        )
         _clear_progress()
         return "error"
     await _download_and_upload_saved_media(client, status_msg, msg, channel_id)
@@ -866,7 +1036,9 @@ async def download_and_upload_saved(client, status_msg, item, channel_id, owner_
 
 async def cmd_save(client, event, channel_id: int) -> None:
     """Accoda un media dei Messaggi Salvati per il caricamento nel canale."""
-    status_msg = await _safe_reply(event, "✅ Comando /save ricevuto!\n🔍 Cerco il media...")
+    status_msg = await _safe_reply(
+        event, "✅ Comando /save ricevuto!\n🔍 Cerco il media..."
+    )
     if status_msg is None:
         return
 
@@ -892,18 +1064,24 @@ async def cmd_save(client, event, channel_id: int) -> None:
     name = name or "media senza titolo"
     title = name[:80]
     key = f"tg://saved/{saved_msg.id}"
-    pos = _get_queue().add(key, "original", title, None,
-                            kind="saved", msg_id=saved_msg.id)
-    _log(f"/save: accodato media nei Messaggi Salvati (id={saved_msg.id}, nome={title!r})")
+    pos = _get_queue().add(
+        key, "original", title, None, kind="saved", msg_id=saved_msg.id
+    )
+    _log(
+        f"/save: accodato media nei Messaggi Salvati (id={saved_msg.id}, nome={title!r})"
+    )
     if _current_item is None and pos == 1:
         await _safe_edit(status_msg, f"⏳ Avvio download: **{_escape_md(title)}**...")
     else:
-        await _safe_edit(status_msg,
-                         f"📥 Aggiunto alla coda (posizione {pos}): **{_escape_md(title)}**")
+        await _safe_edit(
+            status_msg,
+            f"📥 Aggiunto alla coda (posizione {pos}): **{_escape_md(title)}**",
+        )
     return
 
 
 # ─── Telegram post link (t.me/...) ───
+
 
 def _is_telegram_post_link(url: str) -> bool:
     """True se l'URL è un link a un post Telegram (t.me/<canale>/<id>)."""
@@ -921,9 +1099,11 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
     user_id = event.sender_id
     match = TG_LINK_REGEX.match(url)
     if not match:
-        await _safe_reply(event,
+        await _safe_reply(
+            event,
             "❌ Link Telegram non riconosciuto. Formato atteso:\n"
-            "`t.me/canale/123` oppure `t.me/c/123456/789`")
+            "`t.me/canale/123` oppure `t.me/c/123456/789`",
+        )
         return
 
     prefix = match.group("prefix")
@@ -953,9 +1133,11 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
             peer = await client.get_entity(entity)
     except Exception as e:
         _log(f"Telegram link: entity non risolta: {e!r}")
-        await _safe_edit(status_msg,
+        await _safe_edit(
+            status_msg,
             "❌ Canale non accessibile: deve essere pubblico, oppure l'account "
-            "del bot deve esserne membro.")
+            "del bot deve esserne membro.",
+        )
         return
 
     # ── Recupera il messaggio ──
@@ -963,8 +1145,9 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
         msg = await client.get_messages(peer, ids=msg_id)
     except Exception as e:
         _log(f"Telegram link: messaggio non trovato: {e!r}")
-        await _safe_edit(status_msg,
-            "❌ Messaggio non trovato: link errato o post cancellato.")
+        await _safe_edit(
+            status_msg, "❌ Messaggio non trovato: link errato o post cancellato."
+        )
         return
 
     if msg is None or getattr(msg, "media", None) is None:
@@ -982,9 +1165,12 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
         elif getattr(getattr(msg.media, "document", None), "mime_type", ""):
             mime = msg.media.document.mime_type or ""
             mime_ext = {
-                "video/mp4": ".mp4", "video/x-matroska": ".mkv",
-                "image/jpeg": ".jpg", "image/png": ".png",
-                "application/pdf": ".pdf", "application/zip": ".zip",
+                "video/mp4": ".mp4",
+                "video/x-matroska": ".mkv",
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "application/pdf": ".pdf",
+                "application/zip": ".zip",
             }.get(mime, "")
             if mime_ext:
                 ext = mime_ext
@@ -995,30 +1181,42 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
     title = title[:80]
 
     # ── Download del media ──
-    await _safe_edit(status_msg, f"⬇️ Download da Telegram: **{_escape_md(safe_name)}**...")
+    await _safe_edit(
+        status_msg, f"⬇️ Download da Telegram: **{_escape_md(safe_name)}**..."
+    )
     loop = asyncio.get_running_loop()
     last_progress = [0.0]
 
     def progress(received: int, total: int):
         now = time_module.time()
         pct = (received / total * 100) if total else 0
-        _set_progress("download", title, pct, received / (1024 * 1024),
-                      total / (1024 * 1024), 0.0, 0.0)
+        _set_progress(
+            "download",
+            title,
+            pct,
+            received / (1024 * 1024),
+            total / (1024 * 1024),
+            0.0,
+            0.0,
+        )
         if now - last_progress[0] < 3:
             return
         last_progress[0] = now
-        text = f"⬇️ Download: {format_size(received/(1024*1024))}"
+        text = f"⬇️ Download: {format_size(received / (1024 * 1024))}"
         if total:
-            text += f" / {format_size(total/(1024*1024))} · {pct:.0f}%"
+            text += f" / {format_size(total / (1024 * 1024))} · {pct:.0f}%"
         asyncio.run_coroutine_threadsafe(_safe_edit(status_msg, text), loop)
 
     try:
-        if isinstance(msg.media, MessageMediaDocument) and isinstance(msg.media.document, Document):
+        if isinstance(msg.media, MessageMediaDocument) and isinstance(
+            msg.media.document, Document
+        ):
             with open(filepath, "wb") as f:
                 await download_file(client, msg.media.document, f, progress)
         else:
-            downloaded = await client.download_media(msg, file=filepath,
-                                                     progress_callback=progress)
+            downloaded = await client.download_media(
+                msg, file=filepath, progress_callback=progress
+            )
             if downloaded:
                 filepath = downloaded
         if not os.path.exists(filepath):
@@ -1030,7 +1228,7 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
             if os.path.exists(filepath):
                 os.remove(filepath)
         except Exception:
-            pass
+            _log("cleanup media fallito (ignorato)")
         await _safe_edit(status_msg, f"❌ Download fallito: {e}")
         return
 
@@ -1040,8 +1238,11 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
         try:
             os.remove(filepath)
         except Exception:
-            pass
-        await _safe_edit(status_msg, f"❌ File troppo grande ({size_mb/1024:.1f} GB). Limite Telegram: 2GB")
+            _log("cleanup media grande fallito (ignorato)")
+        await _safe_edit(
+            status_msg,
+            f"❌ File troppo grande ({size_mb / 1024:.1f} GB). Limite Telegram: 2GB",
+        )
         return
 
     # Foto: invio diretto (Telethon rileva il tipo).
@@ -1072,6 +1273,34 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
 
 # ─── Process a new link ───
 
+
+async def _queue_or_menu(client, event, user_id: int, finfo) -> None:
+    """Qualità fissa? Accoda subito (niente menu finto 1-2-3-4 che darebbe
+    sempre lo stesso file). Altrimenti mostra il menu qualità."""
+    if getattr(finfo, "fixed_quality", False):
+        queue = _get_queue()
+        title = finfo.title or "Video"
+        pos = queue.add(finfo.url, "max", title, finfo.headers or {})
+        _log(f"Qualità fissa: accodato {title[:50]}")
+        if _current_item is None and pos == 1:
+            await _safe_reply(
+                event,
+                f"⬇️ Avvio download (qualità originale): **{_escape_md(title[:60])}**...",
+            )
+        elif _current_item is None:
+            await _safe_reply(
+                event, f"📥 Aggiunto alla coda (posizione {pos}). Avvio a breve."
+            )
+        else:
+            await _safe_reply(
+                event,
+                f"📥 Aggiunto alla coda (posizione {pos}). "
+                f"Verrà scaricato al termine di quello in corso.",
+            )
+    else:
+        await _send_quality_menu(event, user_id, finfo.url, finfo.title, finfo.headers)
+
+
 async def _process_link(client, event, url: str, channel_id: int) -> None:
     user_id = event.sender_id
 
@@ -1087,12 +1316,14 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
     _lower = url.lower()
     if "vidxgo.co" in _lower or "vidplay." in _lower or "vidplaylink" in _lower:
         _log(f"Link player diretto non supportato: {url}")
-        await _safe_reply(event,
+        await _safe_reply(
+            event,
             "❌ Questo è un link del **player** (vidxgo/vidplay) che funziona solo "
             "incorporato nella pagina del sito.\n\n"
             "📎 Invia invece il link della **pagina del film/serie** su "
             "altadefinizione o streamingcommunity, e il bot troverà il video "
-            "automaticamente.")
+            "automaticamente.",
+        )
         return
 
     # Streaming-site extractors (Playwright) take priority over yt-dlp for
@@ -1107,7 +1338,7 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
                 info = await extractor.extract(url)
             _log(f"Extractor ok: {info.url}")
             await _safe_delete(status_msg)
-            await _send_quality_menu(event, user_id, info.url, info.title, info.headers)
+            await _queue_or_menu(client, event, user_id, info)
         except Exception as e:
             name = getattr(extractor, "__class__", type(extractor)).__name__
             _log(f"Extractor {name} fallito: {e!r}")
@@ -1118,10 +1349,11 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
             if uni_fallback is not None:
                 try:
                     finfo = await uni_fallback.extract(url)
-                    _log(f"Fallback universale ok dopo extractor dedicato: {finfo.url[:80]}")
+                    _log(
+                        f"Fallback universale ok dopo extractor dedicato: {finfo.url[:80]}"
+                    )
                     await _safe_delete(status_msg)
-                    await _send_quality_menu(event, user_id, finfo.url,
-                                              finfo.title, finfo.headers)
+                    await _queue_or_menu(client, event, user_id, finfo)
                     return
                 except Exception as e2:
                     _log(f"Anche il fallback universale è fallito: {e2!r}")
@@ -1133,30 +1365,60 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
         status = entry.get("status")
         title = entry.get("title", "")
         ts = entry.get("ts", 0)
-        date_str = time_module.strftime("%d/%m/%Y", time_module.localtime(ts)) if ts else "?"
+        date_str = (
+            time_module.strftime("%d/%m/%Y", time_module.localtime(ts)) if ts else "?"
+        )
         if status == "ok":
             filepath = entry.get("filepath", "")
             if os.path.exists(filepath):
-                await _safe_reply(event,
+                await _safe_reply(
+                    event,
                     f"📂 **{_escape_md(title)}** già scaricato (uploadato il {date_str}).\n"
-                    f"Scrivi `si` per ricaricarlo, o `no` per annullare.")
-                _set_pending(user_id, {"type": "confirm_retry", "action": "reupload",
-                    "filepath": filepath, "title": title, "url": url})
+                    f"Scrivi `si` per ricaricarlo, o `no` per annullare.",
+                )
+                _set_pending(
+                    user_id,
+                    {
+                        "type": "confirm_retry",
+                        "action": "reupload",
+                        "filepath": filepath,
+                        "title": title,
+                        "url": url,
+                    },
+                )
                 return
             else:
-                await _safe_reply(event,
+                await _safe_reply(
+                    event,
                     f"📂 **{_escape_md(title)}** è già stato uploadato il {date_str}.\n"
-                    f"Scrivi `si` per riscaricarlo, o `no` per annullare.")
-                _set_pending(user_id, {"type": "confirm_retry", "action": "retry_download",
-                    "url": url, "title": title})
+                    f"Scrivi `si` per riscaricarlo, o `no` per annullare.",
+                )
+                _set_pending(
+                    user_id,
+                    {
+                        "type": "confirm_retry",
+                        "action": "retry_download",
+                        "url": url,
+                        "title": title,
+                    },
+                )
                 return
         elif status == "error":
             err = entry.get("error", "errore sconosciuto")
-            await _safe_reply(event,
+            await _safe_reply(
+                event,
                 f"⚠️ Questo link ha dato errore: _{err}_\n"
-                f"Scrivi `si` per riprovare o `no` per annullare.")
-            _set_pending(user_id, {"type": "confirm_retry", "action": "retry_download",
-                "url": url, "title": title})
+                f"Scrivi `si` per riprovare o `no` per annullare.",
+            )
+            _set_pending(
+                user_id,
+                {
+                    "type": "confirm_retry",
+                    "action": "retry_download",
+                    "url": url,
+                    "title": title,
+                },
+            )
             return
 
     status_msg = await _safe_reply(event, "🔍 Analisi del link in attesa...")
@@ -1184,13 +1446,15 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
         _log(f"VideoUnavailable: {e}")
         fallback = get_universal_fallback(url)
         if fallback is not None:
-            _log("yt-dlp segnala non disponibile: verifico comunque col browser (accesso standard)")
+            _log(
+                "yt-dlp segnala non disponibile: verifico comunque col browser (accesso standard)"
+            )
             await _safe_edit(status_msg, "🌐 Verifica disponibilità via browser...")
             try:
                 finfo = await fallback.extract(url)
                 _log(f"Risorsa servita al browser: {finfo.url[:80]}")
                 await _safe_delete(status_msg)
-                await _send_quality_menu(event, user_id, finfo.url, finfo.title, finfo.headers)
+                await _queue_or_menu(client, event, user_id, finfo)
             except Exception:
                 _log("Fallback universale: risorsa non servita dal sito")
                 await _safe_edit(status_msg, f"🔒 {e}")
@@ -1208,7 +1472,7 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
                 finfo = await fallback.extract(url)
                 _log(f"Fallback universale ok: {finfo.url[:80]}")
                 await _safe_delete(status_msg)
-                await _send_quality_menu(event, user_id, finfo.url, finfo.title, finfo.headers)
+                await _queue_or_menu(client, event, user_id, finfo)
             except Exception as e2:
                 _log(f"Fallback universale fallito: {e2!r}")
                 await _safe_edit(status_msg, f"❌ {e}")
@@ -1221,7 +1485,10 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
 
 # ─── Handle selection ───
 
-async def _handle_selection(client, event, user_id: int, text: str, pending: dict, channel_id: int) -> None:
+
+async def _handle_selection(
+    client, event, user_id: int, text: str, pending: dict, channel_id: int
+) -> None:
     text_lower = text.lower().strip()
 
     if pending["type"] == "confirm_resume":
@@ -1254,9 +1521,13 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
                 try:
                     _get_history().remove(url)
                 except Exception:
-                    pass
-                status_msg = await _safe_reply(event, f"📤 Invio file esistente: **{_escape_md(title)}**...")
-                await _upload_existing(client, event, status_msg, filepath, title, channel_id, url)
+                    _log("history remove fallito (ignorato)")
+                status_msg = await _safe_reply(
+                    event, f"📤 Invio file esistente: **{_escape_md(title)}**..."
+                )
+                await _upload_existing(
+                    client, event, status_msg, filepath, title, channel_id, url
+                )
             elif action == "retry_download":
                 url = pending["url"]
                 _clear_pending(user_id)
@@ -1264,7 +1535,7 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
                 try:
                     _get_history().remove(url)
                 except Exception:
-                    pass
+                    _log("history remove fallito (ignorato)")
                 await _process_link(client, event, url, channel_id)
             else:
                 _clear_pending(user_id)
@@ -1280,11 +1551,15 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
 
         if text_lower in ("next", ">", "avanti"):
             new_page = min(pending["page"] + 1, total_pages - 1)
-            await _send_playlist_menu(event, user_id, videos, pending["url"], page=new_page)
+            await _send_playlist_menu(
+                event, user_id, videos, pending["url"], page=new_page
+            )
             return
         if text_lower in ("prev", "<", "indietro"):
             new_page = max(pending["page"] - 1, 0)
-            await _send_playlist_menu(event, user_id, videos, pending["url"], page=new_page)
+            await _send_playlist_menu(
+                event, user_id, videos, pending["url"], page=new_page
+            )
             return
 
         try:
@@ -1339,17 +1614,22 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
         last_pos = 0
         for it in items:
             last_pos = queue.add(
-                it["url"], quality, it["title"], it.get("headers") or {})
+                it["url"], quality, it["title"], it.get("headers") or {}
+            )
             n += 1
         _log(f"Batch: {n} video accodati (qualità {quality}) da {user_id}")
         if _current_item is None and last_pos == 1:
-            await _safe_reply(event,
+            await _safe_reply(
+                event,
                 f"⏳ Batch avviato: **{n} download** in qualità **{label}** "
-                f"uno per uno in automatico...")
+                f"uno per uno in automatico...",
+            )
         else:
-            await _safe_reply(event,
+            await _safe_reply(
+                event,
                 f"📥 **{n} download in coda** (qualità **{label}**). "
-                f"Partono uno per uno in automatico al termine di quelli in corso.")
+                f"Partono uno per uno in automatico al termine di quelli in corso.",
+            )
         return
 
     if pending["type"] == "quality":
@@ -1375,13 +1655,16 @@ async def _handle_selection(client, event, user_id: int, text: str, pending: dic
             if pos == 1:
                 await _safe_reply(event, f"⏳ Avvio download in qualità **{label}**...")
             else:
-                await _safe_reply(event,
-                    f"📥 Aggiunto alla coda (posizione {pos}). Avvio a breve.")
+                await _safe_reply(
+                    event, f"📥 Aggiunto alla coda (posizione {pos}). Avvio a breve."
+                )
         else:
             # Un download è in corso: questo verrà processato dopo.
-            await _safe_reply(event,
+            await _safe_reply(
+                event,
                 f"📥 Aggiunto alla coda (posizione {pos}). "
-                f"Verrà scaricato al termine di quello in corso.")
+                f"Verrà scaricato al termine di quello in corso.",
+            )
         return
 
 
@@ -1393,8 +1676,7 @@ async def _process_batch(client, event, urls: list[str], channel_id: int) -> Non
     sequentially in automatic order.
     """
     user_id = event.sender_id
-    status_msg = await _safe_reply(
-        event, f"🔍 Analisi batch: {len(urls)} link...")
+    status_msg = await _safe_reply(event, f"🔍 Analisi batch: {len(urls)} link...")
     items = []  # {url, title, headers}
     skipped = []
     loop = asyncio.get_running_loop()
@@ -1407,23 +1689,43 @@ async def _process_batch(client, event, urls: list[str], channel_id: int) -> Non
                 try:
                     async with _extract_lock:
                         finfo = await extractor.extract(url)
-                    items.append({"url": finfo.url, "title": finfo.title or "Video",
-                                  "headers": finfo.headers or {}})
-                    await _safe_edit(status_msg, f"🔍 Analisi batch ({i}/{len(urls)}): {items[-1]['title'][:50]}")
+                    items.append(
+                        {
+                            "url": finfo.url,
+                            "title": finfo.title or "Video",
+                            "headers": finfo.headers or {},
+                            "fixed": getattr(finfo, "fixed_quality", False),
+                        }
+                    )
+                    await _safe_edit(
+                        status_msg,
+                        f"🔍 Analisi batch ({i}/{len(urls)}): {items[-1]['title'][:50]}",
+                    )
                     continue
-                except Exception:
+                except Exception:  # pi-lens-ignore: no-boolean-in-except
                     # L'estrattore dedicato ha fallito (markup/token cambiati):
                     # nel batch proviamo comunque il fallback universale browser.
                     fallback = get_universal_fallback(url)
                     if fallback is not None:
                         try:
                             finfo = await fallback.extract(url)
-                            items.append({"url": finfo.url, "title": finfo.title or "Video",
-                                          "headers": finfo.headers or {}})
-                            await _safe_edit(status_msg, f"🔍 Analisi batch ({i}/{len(urls)}): {items[-1]['title'][:50]}")
+                            items.append(
+                                {
+                                    "url": finfo.url,
+                                    "title": finfo.title or "Video",
+                                    "headers": finfo.headers or {},
+                                    "fixed": getattr(finfo, "fixed_quality", False),
+                                }
+                            )
+                            await _safe_edit(
+                                status_msg,
+                                f"🔍 Analisi batch ({i}/{len(urls)}): {items[-1]['title'][:50]}",
+                            )
                             continue
                         except Exception as e2:
-                            _log(f"Batch: anche il fallback universale è fallito per {url}: {e2!r}")
+                            _log(
+                                f"Batch: anche il fallback universale è fallito per {url}: {e2!r}"
+                            )
                     skipped.append(url)
                     continue
             async with _extract_lock:
@@ -1435,14 +1737,20 @@ async def _process_batch(client, event, urls: list[str], channel_id: int) -> Non
             else:
                 title = info.get("title") or "Sconosciuto"
                 items.append({"url": url, "title": title, "headers": {}})
-        except (ExtractError, VideoUnavailableError):
+        except (ExtractError, VideoUnavailableError):  # pi-lens-ignore: no-boolean-in-except
             # yt-dlp non supporta il sito: prova il fallback universale (browser)
             fallback = get_universal_fallback(url)
             if fallback is not None:
                 try:
                     finfo = await fallback.extract(url)
-                    items.append({"url": finfo.url, "title": finfo.title or "Video",
-                                  "headers": finfo.headers or {}})
+                    items.append(
+                        {
+                            "url": finfo.url,
+                            "title": finfo.title or "Video",
+                            "headers": finfo.headers or {},
+                            "fixed": getattr(finfo, "fixed_quality", False),
+                        }
+                    )
                 except Exception as e2:
                     _log(f"Batch fallback universale fallito per {url}: {e2!r}")
                     skipped.append(url)
@@ -1453,12 +1761,39 @@ async def _process_batch(client, event, urls: list[str], channel_id: int) -> Non
             skipped.append(url)
         try:
             current = items[-1]["title"][:50] if items else "..."
-            await _safe_edit(status_msg, f"🔍 Analisi batch ({i}/{len(urls)}): {current}")
+            await _safe_edit(
+                status_msg, f"🔍 Analisi batch ({i}/{len(urls)}): {current}"
+            )
         except Exception:
-            pass
+            _log("aggiornamento batch fallito (ignorato)")
 
     if not items:
         await _safe_edit(status_msg, "❌ Nessun link valido nel batch.")
+        return
+
+    # Se TUTTI i video hanno qualita fissa (es. internetchicks/porn4fans),
+    # il menu qualita sarebbe finto: accoda subito in qualita originale.
+    if all(it.get("fixed", False) for it in items):
+        queue = _get_queue()
+        n = 0
+        last_pos = 0
+        for it in items:
+            last_pos = queue.add(
+                it["url"], "max", it["title"], it.get("headers") or {}
+            )
+            n += 1
+        _log(f"Batch: {n} video a qualita fissa accodati da {user_id}")
+        if _current_item is None and last_pos == 1:
+            await _safe_edit(
+                status_msg,
+                f"⏳ Batch avviato: **{n} download** (qualità originale) uno per uno...",
+            )
+        else:
+            await _safe_edit(
+                status_msg,
+                f"📥 **{n} download in coda** (qualità originale). "
+                f"Partono al termine di quelli in corso.",
+            )
         return
 
     lines = [f"📦 **Batch: {len(items)} video**\n"]
@@ -1476,7 +1811,10 @@ async def _process_batch(client, event, urls: list[str], channel_id: int) -> Non
 
 # ─── Message handler ───
 
-async def on_message(client, event, whitelist: Whitelist, channel_id: int, owner_id: int) -> None:
+
+async def on_message(
+    client, event, whitelist: Whitelist, channel_id: int, owner_id: int
+) -> None:
     user_id = event.sender_id
     if user_id is None:
         return
@@ -1500,15 +1838,17 @@ async def on_message(client, event, whitelist: Whitelist, channel_id: int, owner
         if _current_item is not None and _current_item.get("url") == url:
             _log(f"Link già in lavorazione, ignorato: {url}")
             await _safe_reply(
-                event, "⏳ Questo link è già **in lavorazione**. Attendi il termine "
-                "(scrivi `/status` per lo stato)."
+                event,
+                "⏳ Questo link è già **in lavorazione**. Attendi il termine "
+                "(scrivi `/status` per lo stato).",
             )
             return
         for it in queue.items:
             if it.get("url") == url:
                 _log(f"Link già in coda, ignorato: {url}")
                 await _safe_reply(
-                    event, "📥 Questo link è **già in coda**. Scrivi `/queue` per vederla."
+                    event,
+                    "📥 Questo link è **già in coda**. Scrivi `/queue` per vederla.",
                 )
                 return
         _clear_pending(user_id)
@@ -1530,6 +1870,7 @@ async def on_message(client, event, whitelist: Whitelist, channel_id: int, owner
 
 # ─── Admin commands ───
 
+
 async def cmd_adduser(client, event, whitelist: Whitelist, owner_id: int) -> None:
     if event.sender_id != owner_id:
         return
@@ -1542,7 +1883,11 @@ async def cmd_adduser(client, event, whitelist: Whitelist, owner_id: int) -> Non
         try:
             entity = await client.get_entity(target)
             user_id = entity.id
-            display_name = f"@{entity.username}" if getattr(entity, "username", None) else getattr(entity, "first_name", str(user_id))
+            display_name = (
+                f"@{entity.username}"
+                if getattr(entity, "username", None)
+                else getattr(entity, "first_name", str(user_id))
+            )
         except Exception as e:
             _log(f"get_entity fallito: {e!r}")
             await _safe_reply(event, f"❌ Impossibile trovare `{target}`.")
@@ -1620,7 +1965,9 @@ async def cmd_queue(client, event, owner_id: int) -> None:
     queue = _get_queue()
     lines = []
     if _current_item is not None:
-        lines.append(f"🎬 In corso: **{_escape_md((_current_item.get('title') or '')[:55])}** [{_current_item.get('quality','?')}]")
+        lines.append(
+            f"🎬 In corso: **{_escape_md((_current_item.get('title') or '')[:55])}** [{_current_item.get('quality', '?')}]"
+        )
     else:
         lines.append("🎬 Nessun download in corso.")
     items = queue.items
@@ -1629,7 +1976,9 @@ async def cmd_queue(client, event, owner_id: int) -> None:
         lines.append("_(vuota)_")
     else:
         for i, it in enumerate(items, 1):
-            lines.append(f"{i}. {_escape_md((it.get('title') or 'Sconosciuto')[:55])} [{it.get('quality','?')}]")
+            lines.append(
+                f"{i}. {_escape_md((it.get('title') or 'Sconosciuto')[:55])} [{it.get('quality', '?')}]"
+            )
     await _safe_reply(event, "\n".join(lines))
 
 
@@ -1656,7 +2005,9 @@ async def cmd_clean(client, event, owner_id: int) -> None:
         await _safe_reply(event, "📭 La coda è già vuota.")
         return
     n = len(queue.items)
-    await _safe_reply(event, f"🧹 Vuoi svuotare la coda ({n} item in attesa)? Scrivi `si` o `no`.")
+    await _safe_reply(
+        event, f"🧹 Vuoi svuotare la coda ({n} item in attesa)? Scrivi `si` o `no`."
+    )
     _set_pending(event.sender_id, {"type": "confirm_clean"})
 
 
@@ -1666,7 +2017,7 @@ async def cmd_status(client, event):
     ps = _progress_state
     if ps is not None:
         title = (ps.get("title") or (_current_item or {}).get("title") or "Video")[:55]
-        pct = max(0.0, min(100.0, float(ps.get("pct", 0))))
+        pct = max(0.0, min(100.0, float(ps.get("pct", 0))))  # pi-lens-ignore: unchecked-throwing-call-python
         filled = round(pct / 10)
         bar = "■" * filled + "□" * (10 - filled)
         phase = ps.get("phase", "download")
@@ -1690,7 +2041,7 @@ async def cmd_status(client, event):
         line += "\n_(vuota)_"
     else:
         for i, it in enumerate(queue.items, 1):
-            line += f"\n{i}. {_escape_md((it.get('title') or 'Sconosciuto')[:55])} [{it.get('quality','?')}]"
+            line += f"\n{i}. {_escape_md((it.get('title') or 'Sconosciuto')[:55])} [{it.get('quality', '?')}]"
     await _safe_reply(event, line)
 
 
@@ -1722,7 +2073,10 @@ async def _delayed_reply(event, wait: float, text: str) -> None:
 
 # ─── Handler registration ───
 
-def register_handlers(client, whitelist: Whitelist, channel_id: int, owner_id: int) -> None:
+
+def register_handlers(
+    client, whitelist: Whitelist, channel_id: int, owner_id: int
+) -> None:
     @client.on(events.NewMessage(incoming=True))
     async def _on_message(event):
         if not event.is_private:
@@ -1760,10 +2114,12 @@ def register_handlers(client, whitelist: Whitelist, channel_id: int, owner_id: i
                 await cmd_clean(client, event, owner_id)
                 return
             elif text.startswith("/"):
-                await _safe_reply(event,
+                await _safe_reply(
+                    event,
                     "❌ Comando non riconosciuto.\n"
                     "Comandi disponibili: `/save`, `/adduser`, `/removeuser`, "
-                    "`/users`, `/channel`, `/status`, `/stop`, `/queue`, `/now`, `/clean`")
+                    "`/users`, `/channel`, `/status`, `/stop`, `/queue`, `/now`, `/clean`",
+                )
                 return
         await on_message(client, event, whitelist, channel_id, owner_id)
 
