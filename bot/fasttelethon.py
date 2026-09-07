@@ -232,7 +232,10 @@ class ParallelTransferrer:
 parallel_transfer_locks: DefaultDict[int, asyncio.Lock] = defaultdict(lambda: asyncio.Lock())
 
 
-def stream_file(file_to_stream: BinaryIO, chunk_size=1024):
+# Chunk di lettura: 1KB originale richiedeva ~300k iterazioni + altrettante
+# chiamate al callback di progresso per un file da 300MB. 512KB = 1 parte
+# intera per volta: molto meno overhead CPU e callback.
+def stream_file(file_to_stream: BinaryIO, chunk_size=512 * 1024):
     while True:
         data_read = file_to_stream.read(chunk_size)
         if not data_read:

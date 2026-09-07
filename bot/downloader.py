@@ -246,7 +246,7 @@ def _get_downloader_opts() -> dict:
     opts = {}
 
     # 1. Concurrent fragment downloads (native HLS/DASH multi-threading)
-    concurrent_fragments = os.getenv("CONCURRENT_FRAGMENTS", "16").strip()
+    concurrent_fragments = os.getenv("CONCURRENT_FRAGMENTS", "24").strip()
     try:
         opts["concurrent_fragment_downloads"] = int(concurrent_fragments)
         _log.info(
@@ -257,10 +257,11 @@ def _get_downloader_opts() -> dict:
         opts["concurrent_fragment_downloads"] = 16
         _log.warning("Valore CONCURRENT_FRAGMENTS non valido, uso il default: 16")
 
-    # 2. HTTP chunk size for the native downloader (speeds up single-file CDN pulls)
-    chunk = os.getenv("HTTP_CHUNK_SIZE", "").strip()
+    # 2. HTTP chunk size for the native downloader: split in range da 10MB
+    # (default) => download parallelo dei range anche senza aria2c.
+    chunk = os.getenv("HTTP_CHUNK_SIZE", str(10 * 1024 * 1024)).strip()
     if chunk:
-        opts["http_chunk_size"] = chunk
+        opts["http_chunk_size"] = int(chunk)
         _log.info("http_chunk_size impostato a %s", chunk)
 
     # 3. External downloader (e.g. aria2c for direct HTTP/FTP files)
@@ -285,7 +286,7 @@ def _get_downloader_opts() -> dict:
                     "-s",
                     "16",
                     "-k",
-                    "1M",
+                    "4M",
                     "--file-allocation=none",
                     "--console-log-level=warn",
                     "--summary-interval=1",
