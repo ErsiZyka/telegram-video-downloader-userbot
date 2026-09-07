@@ -8,6 +8,8 @@ from bot.downloader import (
     QUALITY_FORMATS,
     DownloadError,
     ExtractError,
+    _download_direct_http,
+    _ensure_mp4_ext,
     _resolve_downloaded_file,
     check_dependencies,
     download_video,
@@ -323,3 +325,132 @@ class TestResolveDownloadedFile:
             self._touch(fresh, 1_000_000)
             predicted = os.path.join(d, "nuovo.NOPE")
             assert _resolve_downloaded_file(predicted, d) == fresh
+
+
+class TestEnsureMp4Ext:
+    """Il gateway remote_control.php di x-video.tube serve un MP4 vero ma
+    yt-dlp ricava l'estensione dall'URL -> file "Titolo.php". ffprobe deve
+    riconoscere il contenuto e il file va rinominato in .mp4."""
+
+    @staticmethod
+    def _make_mp4(path: str) -> None:
+        import subprocess
+
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc=duration=0.3:size=128x96:rate=10",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-f", "mp4",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_php_con_mp4_dentro_rinominato(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "Video.php")
+            self._make_mp4(fake)
+            result = _ensure_mp4_ext(fake)
+            assert result == os.path.join(d, "Video.mp4")
+            assert os.path.exists(result)
+            assert not os.path.exists(fake)
+
+    def test_file_non_video_intatto(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "pagina.php")
+            with open(fake, "w") as f:
+                f.write("<html>non sono un video</html>")
+            assert _ensure_mp4_ext(fake) == fake
+            assert os.path.exists(fake)
+
+    def test_estensioni_valide_intatte(self):
+        with tempfile.TemporaryDirectory() as d:
+            for ext in (".mp4", ".mkv", ".webm"):
+                p = os.path.join(d, "v" + ext)
+                self._touch = None  # noqa: non serve touch reale
+                with open(p, "wb") as f:
+                    f.write(b"\x00")
+                assert _ensure_mp4_ext(p) == p
+
+    def test_vuoto(self):
+        assert _ensure_mp4_ext("") == ""
+
+
+class TestDownloadDirectHttp:
+    """Gateway .php (x-video.tube): yt-dlp blocca l'estensione insolita, il
+    fallback HTTP diretto deve scaricare il body, segnalare progresso e
+    scrivere un .mp4 col titolo come nome."""
+
+    @staticmethod
+    def _serve(payload: bytes):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    def test_direct_http_download(self):
+        from bot.downloader import _download_direct_http
+
+        payload = b"X" * (256 * 1024 * 2 + 11)
+        srv = self._serve(payload)
+        try:
+            old = os.getcwd()
+            with tempfile.TemporaryDirectory() as d:
+                os.chdir(d)
+                try:
+                    url = "http://127.0.0.1:{}/f.mp4?v-acctoken=x".format(
+                        srv.server_address[1]
+                    )
+                    calls = []
+
+                    def cb(a, b, c, e):
+                        calls.append((a, b))
+
+                    path = _download_direct_http(
+                        url, cb, {"Referer": "https://x-video.tube/"}, "Video - Test"
+                    )
+                    assert path == os.path.join("downloads", "Video - Test.mp4")
+                    with open(path, "rb") as f:
+                        assert f.read() == payload
+                    assert calls, "progress mai chiamato"
+                    assert calls[-1][1] > 0
+                finally:
+                    os.chdir(old)
+        finally:
+            srv.shutdown()
+
+    def test_direct_http_nome_sicuro(self):
+        from bot.downloader import _download_direct_http
+
+        payload = b"Y" * 1024
+        srv = self._serve(payload)
+        try:
+            old = os.getcwd()
+            with tempfile.TemporaryDirectory() as d:
+                os.chdir(d)
+                try:
+                    url = "http://127.0.0.1:{}/f.mp4".format(srv.server_address[1])
+                    path = _download_direct_http(url, None, None, 'A/B:C"D')
+                    name = os.path.basename(path)
+                    assert name.endswith(".mp4")
+                    # caratteri pericolosi rimossi dal titolo
+                    assert "/" not in name and ":" not in name and '"' not in name
+                finally:
+                    os.chdir(old)
+        finally:
+            srv.shutdown()

@@ -59,6 +59,9 @@ class TestCanHandle:
         assert Porn4FansExtractor.can_handle(
             "https://shareanynudes.com/video/tanababyxo-x/"
         )
+        assert Porn4FansExtractor.can_handle(
+            "https://x-video.tube/video/806884/mira-love-aka-mrsmiralove/"
+        )
 
     def test_porn4fans_no_match(self):
         assert not Porn4FansExtractor.can_handle("https://youtube.com/watch?v=x")
@@ -143,17 +146,27 @@ class TestRegistry:
         ext2 = get_extractor("https://123av.org/dm32/en/x")
         assert isinstance(ext2, SurritExtractor)
 
+    def test_get_extractor_xvideo_tube(self):
+        # La via principale per x-video.tube e' HTTP (porn4fans get_file):
+        # il browser XVideoTubeExtractor resta solo come fallback universale.
+        ext = get_extractor(
+            "https://x-video.tube/video/806884/mira-love-aka-mrsmiralove/"
+        )
+        assert isinstance(ext, Porn4FansExtractor)
+
     def test_get_extractor_none(self):
         assert get_extractor("https://youtube.com/watch?v=x") is None
         assert get_extractor("https://it.youporn.com/watch/123") is None
 
-    def test_universal_fallback_xvideo_tube_not_none(self):
+    def test_universal_fallback_xvideo_tube_none(self):
+        # x-video.tube: il fallback browser NON deve mai partire (intercetta
+        # ad/gif). Via unica = extractor HTTP dedicato.
         from bot.extractors import get_universal_fallback
 
         fb = get_universal_fallback(
             "https://x-video.tube/video/806884/mira-love-aka-mrsmiralove-01-06-2025/"
         )
-        assert isinstance(fb, XVideoTubeExtractor)
+        assert fb is None
 
 
     def test_get_extractor_returns_instance(self):
@@ -205,8 +218,12 @@ class TestResolveDirectUrl:
     )
 
     @staticmethod
-    def _fake_response(final_url: str):
+    def _fake_response(final_url: str, ok: bool = True):
         class _Resp:
+            status = 206 if ok else 404
+
+            headers = {"Content-Type": "video/mp4" if ok else "text/html"}
+
             def geturl(self):
                 return final_url
 
@@ -257,6 +274,23 @@ class TestResolveDirectUrl:
             )
         assert "remote_control.php" not in result
         assert "get_file" in result
+
+    def test_direct_non_servito_resta_gateway(self):
+        # x-video.tube: il path .mp4 riscritto NON esiste (404) ma il gateway
+        # remote_control.php serve il video. Se la probe del diretto fallisce
+        # si mantiene il gateway: yt-dlp lo segue e rileva il content-type.
+        from unittest.mock import patch
+
+        gateway = self._GATEWAY
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=[self._fake_response(gateway), OSError],
+        ):
+            result = _resolve_direct_url(
+                "https://x-video.tube/get_file/4/x/812000/812722/812722_720p.mp4/?v-acctoken=t",
+                "https://x-video.tube/",
+            )
+        assert result == gateway
 
     def test_pick_m3u8_prefers_master_playlist(self):
         urls = [

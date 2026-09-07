@@ -1,5 +1,6 @@
-"""Extractor per la piattaforma "get_file/v-acctoken" (porn4fans.com e
-shareanynudes.com — stesso motore, anche su altri sottodomini: it., en., ...).
+"""Extractor per la piattaforma "get_file/v-acctoken" (porn4fans.com,
+shareanynudes.com e x-video.tube — stesso motore, anche su altri sottodomini:
+it., en., ...).
 
 Il sito serve i video come MP4 diretti protetti da token anti-leech: la
 pagina del video contiene URL del tipo
@@ -128,8 +129,16 @@ def _resolve_direct_url(url: str, referer: str) -> str:
     if not path:
         return final
     direct = urlunsplit((parts.scheme, parts.netloc, path, urlencode(keep), ""))
-    _log.info("Gateway .php -> mp4 diretto: %s", direct[:110])
-    return direct
+    # Il path diretto NON esiste su tutti i CDN: su x-video.tube (storage2)
+    # il video e' servito SOLO tramite il gateway remote_control.php e il
+    # path riscritto risponde 404. Verifica il diretto: se non e' servito,
+    # resta sul gateway .php (yt-dlp segue il redirect e rileva il
+    # content-type: verificato, produce un formato scaricabile).
+    if _probe_ok(direct, referer):
+        _log.info("Gateway .php -> mp4 diretto: %s", direct[:110])
+        return direct
+    _log.info("Path diretto non servito dal CDN: mantengo il gateway %s", final[:110])
+    return final
 
 
 def _quality_of(url: str) -> int:
@@ -162,11 +171,41 @@ def _page_title(page: str) -> str:
 
 
 class Porn4FansExtractor(BaseExtractor):
-    DOMAINS: tuple[str, ...] = ("porn4fans.com", "shareanynudes.com")
+    DOMAINS: tuple[str, ...] = ("porn4fans.com", "shareanynudes.com", "x-video.tube")
 
     async def extract(self, url: str) -> VideoInfo:
         page = _fetch(url)
         referer = f"{urlparse(url).scheme}://{urlparse(url).netloc}/"
+
+        # x-video.tube: prendi SOLO il video della pagina, mai ad/gif:
+        # la pagina contiene anche un "<id>.mp4" che e' in realta' una GIF
+        # animata e preview di altri video. Il video vero e'
+        # "/<block>/<id>/<id>_<quality>p.mp4" (con token).
+        vid_m = re.search(r"/video/(\d+)/", url)
+        if "x-video.tube" in url.lower() and vid_m:
+            vid = vid_m.group(1)
+            allcand = [
+                c
+                for c in _GET_FILE_RE.findall(page)
+                if re.search(r"/" + vid + r"_\d{3,4}p\.mp4", c)
+                and "v-acctoken=" in c
+            ]
+            if not allcand:
+                raise RuntimeError("Nessun video principale trovato per id " + vid)
+            candidates = allcand
+            chosen = candidates[0]
+            title = _page_title(page)
+            _log.info("X-Video.tube: %s -> %s", title[:60], chosen[-90:])
+            return VideoInfo(
+                url=chosen,
+                title=title,
+                headers={
+                    "User-Agent": _UA,
+                    "Referer": f"{urlparse(url).scheme}://{urlparse(url).netloc}/",
+                    "Accept": "*/*",
+                },
+                fixed_quality=True,
+            )
 
         # Tutte le varianti col token, senza preview e senza duplicati.
         seen: set[str] = set()

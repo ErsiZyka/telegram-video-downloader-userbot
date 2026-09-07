@@ -396,6 +396,7 @@ async def download_and_upload(
                     download_progress,
                     1,
                     headers,
+                    title,
                 )
                 _log(f"Download completato: {filepath}")
                 break
@@ -448,6 +449,7 @@ async def download_and_upload(
                             download_progress,
                             1,
                             finfo.headers,
+                            title,
                         )
                         _log(f"Download completato dopo fallback browser: {filepath}")
                     except CancelDownload:

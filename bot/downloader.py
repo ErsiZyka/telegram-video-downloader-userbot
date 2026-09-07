@@ -538,12 +538,106 @@ def _resolve_downloaded_file(
     return predicted or ""
 
 
+def _ensure_mp4_ext(filepath: str) -> str:
+    """Normalizza l'estensione quando il CDN serve MP4 con estensione strana.
+
+    Caso reale: il gateway remote_control.php di x-video.tube restituisce un
+    MP4 vero ma yt-dlp ricava l'estensione dall'URL -> file "Titolo.php".
+    Se ffprobe riconosce il contenuto come video, rinomina in .mp4 cosi'
+    Telegram mostra un nome sensato e lo streaming funziona. Se ffprobe non
+    riconosce il file (non e' un video, o e' corrotto) non tocca nulla.
+    """
+    if not filepath:
+        return filepath
+    root, ext = os.path.splitext(filepath)
+    if ext.lower() in (".mp4", ".mkv", ".webm", ".mov", ".m4v"):
+        return filepath
+    if probe_video_metadata(filepath) == (0, 0, 0):
+        return filepath  # non e' un video riconoscibile: lascia stare
+    new_path = root + ".mp4"
+    try:
+        os.replace(filepath, new_path)
+        _log.info(
+            "Estensione normalizzata: %s -> %s",
+            os.path.basename(filepath),
+            os.path.basename(new_path),
+        )
+        return new_path
+    except OSError as e:
+        _log.warning("Rinomina estensione fallita per %s: %s", filepath, e)
+        return filepath
+
+
+def _download_direct_http(
+    url: str,
+    progress_callback,
+    extra_headers: dict | None,
+    title: str | None,
+) -> str:
+    """Download HTTP diretto (senza yt-dlp) per gateway .php che servono MP4.
+
+    Caso reale (x-video.tube/storage2): il gateway remote_control.php serve un
+    MP4 vero ma yt-dlp blocca l'estensione insolita per sicurezza
+    (GHSA-79w7-vh3h-8g4j). L'extractor ha GIA' verificato con un range-probe
+    che il contenuto e' un video diretto, quindi qui si scarica direttamente:
+    si seguono i redirect, si scrive un .mp4 e si riporta il progresso con lo
+    stesso callback di yt-dlp (che puo' anche sollevare CancelDownload).
+    """
+    import urllib.request
+
+    os.makedirs("downloads", exist_ok=True)
+    safe_title = re.sub(r"[^\w\s.-]", "", title or "").strip()
+    base = safe_title[:100] or f"video_{int(time.time())}"
+    out_path = os.path.join("downloads", f"{base}.mp4")
+    if os.path.exists(out_path):
+        out_path = os.path.join("downloads", f"{base}_{int(time.time())}.mp4")
+
+    req_headers = {"User-Agent": _DEFAULT_UA, "Accept": "*/*"}
+    for k in ("User-Agent", "Referer", "Cookie"):
+        if (extra_headers or {}).get(k):
+            req_headers[k] = extra_headers[k]
+
+    req = urllib.request.Request(url, headers=req_headers)  # pi-lens-ignore: S310
+    started = time.time()
+    downloaded = 0
+    _log.info("Download HTTP diretto: %s -> %s", url[:90], os.path.basename(out_path))
+    with urllib.request.urlopen(req, timeout=60) as r:  # pi-lens-ignore: S310
+        total = int(r.headers.get("Content-Length") or 0)
+        with open(out_path, "wb") as f:
+            while True:
+                chunk = r.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                elapsed = max(time.time() - started, 0.001)
+                speed = downloaded / elapsed / 1048576
+                eta = (
+                    (total - downloaded) / (speed * 1048576)
+                    if total and speed > 0
+                    else None
+                )
+                if progress_callback:
+                    progress_callback(
+                        downloaded / 1048576, total / 1048576, speed, eta
+                    )
+    if downloaded == 0:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        raise DownloadError("HTTP diretto: risposta vuota dal CDN")
+    _log.info("Download HTTP diretto completato: %s (%.1f MB)", out_path, downloaded / 1048576)
+    return out_path
+
+
 def download_video(
     url: str,
     quality: str,
     progress_callback,
     max_retries: int = 3,
     extra_headers: dict | None = None,
+    title: str | None = None,
 ) -> str:
     """
     Download a video at the specified quality with retry logic.
@@ -553,6 +647,8 @@ def download_video(
         quality: One of "360", "720", "1080", "max"
         progress_callback: callable(downloaded_mb, total_mb, speed_mbps, eta_seconds)
         max_retries: Number of download attempts before giving up
+        extra_headers: HTTP headers the CDN requires (anti-leech)
+        title: Video title, used as filename in the direct-HTTP fallback
 
     Returns:
         Path to the downloaded file
@@ -660,6 +756,7 @@ def download_video(
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 filename = _resolve_downloaded_file(ydl.prepare_filename(info))
+                filename = _ensure_mp4_ext(filename)
                 _log.info("Download completato: %s", filename)
                 return filename
 
@@ -674,6 +771,14 @@ def download_video(
             _log.info("Riavvio con %d fragment concorrenti (era %d)", boosted, cur)
         except yt_dlp.utils.DownloadError as e:
             last_error = str(e)
+            # Gateway .php (es. x-video.tube/storage2): yt-dlp blocca
+            # l'estensione insolita per sicurezza (GHSA-79w7-vh3h-8g4j) ma
+            # l'extractor ha gia' verificato col range-probe che il contenuto
+            # e' un MP4 diretto: scarica via HTTP senza passare da yt-dlp.
+            if "unusual and will be skipped" in last_error:
+                return _download_direct_http(
+                    url, progress_callback, extra_headers, title
+                )
             # Some streaming CDNs offer discrete quality tiers (480/720/1080)
             # and don't have a 360p variant. If the requested quality is not
             # available, fall back to "best" once so the user still gets a video.
@@ -692,6 +797,7 @@ def download_video(
                         filename = _resolve_downloaded_file(
                             ydl.prepare_filename(info)
                         )
+                        filename = _ensure_mp4_ext(filename)
                         return filename
                 except yt_dlp.utils.DownloadError as e2:
                     last_error = str(e2)

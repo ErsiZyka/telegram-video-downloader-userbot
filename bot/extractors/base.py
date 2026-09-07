@@ -130,6 +130,13 @@ class PlaywrightVideoExtractor(BaseExtractor):
     # non arriva il video vero. Default: nessun filtro.
     SKIP_URL_PATTERNS: tuple[str, ...] = ()
 
+    # Inverso di SKIP_URL_PATTERNS: se non vuoto, uno stream viene accettato
+    # SOLO se l'URL matcha uno di questi pattern. Utile quando il sito mescola
+    # pre-roll pubblicitari e video vero su CDN diverse e la black-list non
+    # copre tutti gli host degli ad (fail-loud: niente stream -> errore chiaro,
+    # MAI scaricare un ad per sbaglio).
+    ALLOW_URL_PATTERNS: tuple[str, ...] = ()
+
     async def extract(self, url: str) -> VideoInfo:
         video_url: str | None = None
         video_headers: dict = {}
@@ -153,6 +160,10 @@ class PlaywrightVideoExtractor(BaseExtractor):
                 return
             if any(p in u.lower() for p in self.SKIP_URL_PATTERNS):
                 _log.info("Stream saltato (SKIP_URL_PATTERNS): %s", u[:100])
+                return
+            allow = self.ALLOW_URL_PATTERNS
+            if allow and not any(p in u.lower() for p in allow):
+                _log.info("Stream scartato (non in ALLOW_URL_PATTERNS): %s", u[:100])
                 return
             if _is_stream_response(u, ct):
                 video_url = u
@@ -286,6 +297,10 @@ class PlaywrightVideoExtractor(BaseExtractor):
                 return
             if any(p in u.lower() for p in self.SKIP_URL_PATTERNS):
                 _log.info("[Camoufox] Stream saltato (SKIP_URL_PATTERNS): %s", u[:100])
+                return
+            allow = self.ALLOW_URL_PATTERNS
+            if allow and not any(p in u.lower() for p in allow):
+                _log.info("[Camoufox] Stream scartato (non in ALLOW_URL_PATTERNS): %s", u[:100])
                 return
             if _is_stream_response(u, ct):
                 video_url = u

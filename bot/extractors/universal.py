@@ -113,10 +113,13 @@ class UniversalPlaywrightExtractor(PlaywrightVideoExtractor):
 class XVideoTubeExtractor(UniversalPlaywrightExtractor):
     """x-video.tube: yt-dlp non riesce a estrarre il player (flashvars).
 
-    Il browser intercetta lo stream servito al player. La pagina mostra un
-    pre-roll pubblicitario (CDN thumb.live.mmcdn.com/roomad/...) che va
-    ignorato: il video vero arriva dopo, dalla CDN bkcdn.net/library/... .
-    AFTER_CLICK_WAIT più lungo perché il video parte solo dopo la fine dell'ad.
+    La pagina mescola pre-roll pubblicitari e video vero su CDN diverse:
+      - AD:  thumb.live.mmcdn.com/roomad/... e cdn.sadbaguette.com/.../cwgnv_*.mp4
+             (file con nome FISSO riutilizzato su video diversi: sono spot);
+      - VERO video: z6v2p9a8.bkcdn.net/library/<lib>/<sha1>.mp4 (nome unico).
+    La black-list degli ad non basta (la rete ad ruota), quindi si usa una
+    WHITELIST della CDN del video vero: fail-loud se non arriva, MAI uno spot.
+    AFTER_CLICK_WAIT lungo perche' il video parte solo dopo la fine dell'ad.
     """
     DOMAINS: tuple[str, ...] = ("x-video.tube",)
     SKIP_URL_PATTERNS: tuple[str, ...] = (
@@ -124,4 +127,5 @@ class XVideoTubeExtractor(UniversalPlaywrightExtractor):
         "doubleclick.net",
         "googlesyndication.com",
     )
+    ALLOW_URL_PATTERNS: tuple[str, ...] = ("bkcdn.net/library/",)
     AFTER_CLICK_WAIT = 40
