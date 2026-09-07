@@ -57,9 +57,13 @@ def get_universal_fallback(url: str) -> BaseExtractor | None:
     a working yt-dlp extractor never pay the browser cost."""
     if not _PLAYWRIGHT_AVAILABLE:
         return None
-    from bot.extractors.universal import UniversalPlaywrightExtractor
-    if UniversalPlaywrightExtractor.can_handle(url):
-        return UniversalPlaywrightExtractor()
+    from bot.extractors.universal import (
+        UniversalPlaywrightExtractor,
+        XVideoTubeExtractor,
+    )
+    for cls in (XVideoTubeExtractor, UniversalPlaywrightExtractor):
+        if cls.can_handle(url):
+            return cls()
     return None
 
 

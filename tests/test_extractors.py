@@ -6,6 +6,10 @@ from bot.extractors.internetchicks import InternetchicksExtractor, _find_embeds
 from bot.extractors.porn4fans import Porn4FansExtractor, _resolve_direct_url
 from bot.extractors.streamingcommunity import StreamingCommunityExtractor
 from bot.extractors.surrit import SurritExtractor, _pick_m3u8
+from bot.extractors.universal import (
+    UniversalPlaywrightExtractor,
+    XVideoTubeExtractor,
+)
 
 
 class TestCanHandle:
@@ -75,6 +79,26 @@ class TestCanHandle:
     def test_internetchicks_no_match(self):
         assert not InternetchicksExtractor.can_handle("https://youtube.com/watch?v=x")
 
+    def test_xvideo_tube_matches(self):
+        # x-video.tube: yt-dlp non riconosce il player (flashvars). Ha un
+        # extractor browser dedicato (XVideoTubeExtractor) che ignora il
+        # pre-roll pubblicitario /roomad/ e cattura il video vero (bkcdn).
+        assert XVideoTubeExtractor.can_handle(
+            "https://x-video.tube/video/806884/mira-love-aka-mrsmiralove-01-06-2025-onlyfans-video-un-piccolo-assaggio-di-come-si-twerka-su-un-cazzo/"
+        )
+        assert XVideoTubeExtractor.can_handle("https://x-video.tube/video/1/x/")
+        # Il generico NON deve più accettare il dominio: c'è l'extractor dedicato.
+        assert not UniversalPlaywrightExtractor.can_handle(
+            "https://x-video.tube/video/1/x/")
+
+    def test_universal_no_match(self):
+        assert not UniversalPlaywrightExtractor.can_handle("https://youtube.com/watch?v=x")
+        # NB: porn4fans/123av/missav sono VOLUTAMENTE nella lista universale
+        # (rete di sicurezza browser): uso un dominio estraneo per il no-match.
+        assert not UniversalPlaywrightExtractor.can_handle(
+            "https://example.com/video/1/x/")
+
+
     def test_find_embeds_prefers_streamtape(self):
         html = (
             "<button onclick=\"playEmbed('https://voe.sx/e/aa');\">P1</button>"
@@ -122,6 +146,15 @@ class TestRegistry:
     def test_get_extractor_none(self):
         assert get_extractor("https://youtube.com/watch?v=x") is None
         assert get_extractor("https://it.youporn.com/watch/123") is None
+
+    def test_universal_fallback_xvideo_tube_not_none(self):
+        from bot.extractors import get_universal_fallback
+
+        fb = get_universal_fallback(
+            "https://x-video.tube/video/806884/mira-love-aka-mrsmiralove-01-06-2025/"
+        )
+        assert isinstance(fb, XVideoTubeExtractor)
+
 
     def test_get_extractor_returns_instance(self):
         ext = get_extractor("https://altadefinizione.hot/x")

@@ -124,6 +124,12 @@ class PlaywrightVideoExtractor(BaseExtractor):
     AFTER_CLICK_WAIT = 12  # seconds to wait after clicking play for the stream
     HEADLESS: bool = True  # some sites refuse to mount the player in headless
 
+    # URL di stream da IGNORARE durante l'intercettazione (pre-roll
+    # pubblicitari, watermark, ecc.): le risposte che matchano uno di questi
+    # pattern vengono scartate, così l'estrattore continua ad ascoltare finché
+    # non arriva il video vero. Default: nessun filtro.
+    SKIP_URL_PATTERNS: tuple[str, ...] = ()
+
     async def extract(self, url: str) -> VideoInfo:
         video_url: str | None = None
         video_headers: dict = {}
@@ -144,6 +150,9 @@ class PlaywrightVideoExtractor(BaseExtractor):
             # un URL video con token GIÀ SCADUTO che il CDN risponde 403 (es.
             # bustybus): catturarlo produrrebbe un download fallito a colpo sicuro.
             if st >= 400:
+                return
+            if any(p in u.lower() for p in self.SKIP_URL_PATTERNS):
+                _log.info("Stream saltato (SKIP_URL_PATTERNS): %s", u[:100])
                 return
             if _is_stream_response(u, ct):
                 video_url = u
@@ -274,6 +283,9 @@ class PlaywrightVideoExtractor(BaseExtractor):
             except Exception:
                 return
             if st >= 400:
+                return
+            if any(p in u.lower() for p in self.SKIP_URL_PATTERNS):
+                _log.info("[Camoufox] Stream saltato (SKIP_URL_PATTERNS): %s", u[:100])
                 return
             if _is_stream_response(u, ct):
                 video_url = u

@@ -108,3 +108,20 @@ class UniversalPlaywrightExtractor(PlaywrightVideoExtractor):
     )
     RENDER_WAIT = 12
     AFTER_CLICK_WAIT = 15
+
+
+class XVideoTubeExtractor(UniversalPlaywrightExtractor):
+    """x-video.tube: yt-dlp non riesce a estrarre il player (flashvars).
+
+    Il browser intercetta lo stream servito al player. La pagina mostra un
+    pre-roll pubblicitario (CDN thumb.live.mmcdn.com/roomad/...) che va
+    ignorato: il video vero arriva dopo, dalla CDN bkcdn.net/library/... .
+    AFTER_CLICK_WAIT più lungo perché il video parte solo dopo la fine dell'ad.
+    """
+    DOMAINS: tuple[str, ...] = ("x-video.tube",)
+    SKIP_URL_PATTERNS: tuple[str, ...] = (
+        "/roomad/",  # pre-roll osservato su thumb.live.mmcdn.com
+        "doubleclick.net",
+        "googlesyndication.com",
+    )
+    AFTER_CLICK_WAIT = 40
