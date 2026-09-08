@@ -9,10 +9,14 @@ inside the bot process and touches only the live singletons.
 Endpoints (all JSON, all require ``Authorization: Bearer <token>``):
     GET  /api/health    -> {ok, queue_len, current}
     GET  /api/queue     -> {current, items}
-    POST /api/queue     -> {url, quality?, title?, headers?} adds a job
+    POST /api/queue     -> {url, quality?, title?, headers?, kind?, filepath?,
+                       msg_id?, page_url?, target_channel?} adds a job
     POST /api/cancel    -> {job?} cancels one job (or the current one)
+    POST /api/move      -> {url} moves a queued job to the front
+    POST /api/clear     -> {} empties the queue
     GET  /api/progress  -> {current, jobs}
     GET  /api/history?url=... -> history entry for a URL
+    GET  /api/history/recent?limit=20 -> latest entries, ts desc
 
 Stdlib only (no new dependencies). Bound to 127.0.0.1 by default.
 Disabled with ``LOCAL_API_PORT=0`` / ``off`` / empty.
@@ -127,7 +131,17 @@ class _Handler(BaseHTTPRequestHandler):
                 "current": _progress.get_current_job(),
                 "jobs": _progress.all_progress(),
             })
-        elif parsed.path == "/api/history":
+        elif parsed.path == "/api/history/recent":
+            try:
+                limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
+            except (TypeError, ValueError):
+                limit = 20
+            limit = max(1, min(limit, 200))
+            hist = h._get_history()
+            ranked = sorted(hist._data.items(),
+                            key=lambda kv: kv[1].get("ts", 0), reverse=True)[:limit]
+            self._send(200, {"ok": True, "entries": [
+                {"url": url, **entry} for url, entry in ranked]})
             url = parse_qs(parsed.query).get("url", [""])[0]
             entry = h._get_history().get(url) if url else None
             if entry is None:
@@ -145,6 +159,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_queue_add()
         elif parsed.path == "/api/cancel":
             self._handle_cancel()
+        elif parsed.path == "/api/move":
+            self._handle_move()
+        elif parsed.path == "/api/clear":
+            self._handle_clear()
         else:
             self._send(404, {"ok": False, "error": "unknown endpoint"})
 
@@ -162,6 +180,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if not isinstance(headers, dict):
             headers = {}
+        extra = {k: body[k] for k in (
+            "kind", "filepath", "msg_id", "page_url", "target_channel",
+        ) if body.get(k) is not None}
         queue = h._get_queue()
         current = h._current_item
         if current is not None and current.get("url") == url:
@@ -170,9 +191,23 @@ class _Handler(BaseHTTPRequestHandler):
         if any(it.get("url") == url for it in queue.items):
             self._send(409, {"ok": False, "error": "already queued"})
             return
-        pos = queue.add(url, quality, title, headers)
+        pos = queue.add(url, quality, title, headers, **extra)
         _log.info("API: accodato %s [%s] (pos %d)", title[:60], quality, pos)
         self._send(200, {"ok": True, "position": pos})
+
+    def _handle_move(self) -> None:
+        body = self._read_json()
+        url = str(body.get("url", "") or "").strip()
+        if not url:
+            self._send(400, {"ok": False, "error": "missing url"})
+            return
+        moved = h._get_queue().move_front(url)
+        self._send(200 if moved else 404, {"ok": moved, "moved": moved})
+
+    def _handle_clear(self) -> None:
+        removed = h._get_queue().clear()
+        _log.info("API: coda svuotata (%d item)", removed)
+        self._send(200, {"ok": True, "removed": removed})
 
     def _handle_cancel(self) -> None:
         body = self._read_json()

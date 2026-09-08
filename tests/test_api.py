@@ -19,7 +19,7 @@ from bot.queue import DownloadQueue
 VALID_CRED = "test-token"
 
 
-def _call(server, method, path, body=None, cred=VALID_CRED):
+def _call(server, method, path, body=None, cred: str | None = VALID_CRED):
     url = f"http://127.0.0.1:{server.server_port}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)  # pi-lens-ignore: S310
@@ -86,3 +86,43 @@ def test_cancel_job_drops_queued_item(api):
 def test_history_missing_is_404(api):
     status, body = _call(api, "GET", "/api/history?url=https://example.com/nope")
     assert status == 404
+
+
+def test_queue_add_passthrough_extras(api):
+    status, body = _call(api, "POST", "/api/queue",
+                         {"url": "https://example.com/x", "quality": "720",
+                          "target_channel": "-1001", "kind": "web"})
+    assert status == 200
+    _, q = _call(api, "GET", "/api/queue")
+    assert q["items"][0]["target_channel"] == "-1001"
+    assert q["items"][0]["kind"] == "web"
+
+
+def test_move_and_clear(api):
+    _call(api, "POST", "/api/queue", {"url": "https://example.com/a"})
+    _call(api, "POST", "/api/queue", {"url": "https://example.com/b"})
+    status, body = _call(api, "POST", "/api/move", {"url": "https://example.com/b"})
+    assert (status, body["moved"]) == (200, True)
+    _, q = _call(api, "GET", "/api/queue")
+    assert q["items"][0]["url"] == "https://example.com/b"
+    status, body = _call(api, "POST", "/api/move", {"url": "https://example.com/zz"})
+    assert (status, body["moved"]) == (404, False)
+    status, body = _call(api, "POST", "/api/clear", {})
+    assert (status, body["removed"]) == (200, 2)
+    _, q = _call(api, "GET", "/api/queue")
+    assert q["items"] == []
+
+
+def test_history_recent(api):
+    hist = h._get_history()
+    hist.set_success("https://example.com/old", "f.mp4", "Old")
+    hist.set_error("https://example.com/new", "boom", "New")
+    try:
+        status, body = _call(api, "GET", "/api/history/recent?limit=10")
+        assert status == 200
+        urls = [e["url"] for e in body["entries"]]
+        assert urls[0] == "https://example.com/new"
+        assert "https://example.com/old" in urls
+    finally:
+        hist.remove("https://example.com/old")
+        hist.remove("https://example.com/new")
