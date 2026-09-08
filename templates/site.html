@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Videodownloader</title>
+<style>
+  :root{
+    --paper:#161513; --surface:#201E1A; --ink:#ECE8DD; --muted:#97907F;
+    --line:#2C2921; --line-dark:#3D392E;
+    --acc:#5AA9E6; --ok:#4CC38A; --err:#E5484D; --warn:#E5A13D;
+    --serif:Georgia,'Times New Roman',serif;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;
+    --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--paper); color:var(--ink); font-family:var(--sans);
+    font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:620px; margin:0 auto; padding:0 22px 70px;}
+  .mast{padding:34px 0 6px; display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap;}
+  .mast h1{font-family:var(--serif); font-weight:400; font-size:30px; letter-spacing:-.01em;}
+  .mast h1 em{font-style:italic;}
+  .mast .dot{display:inline-block; width:8px; height:8px; border-radius:50%;
+    background:var(--acc); margin-right:8px; animation:pulse 2.2s infinite;}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  .mast small{font-family:var(--mono); font-size:11px; color:var(--muted);}
+  .offline{display:none; border:1px solid var(--err); color:var(--err); border-radius:8px;
+    padding:10px 12px; font-size:13.5px; margin-top:10px;}
+  .offline.on{display:block;}
+  nav.topnav{position:sticky; top:0; z-index:5; background:var(--paper);
+    display:flex; gap:22px; margin-top:14px; border-top:1px solid var(--ink);
+    border-bottom:1px solid var(--line); overflow-x:auto;}
+  nav.topnav button{background:none; border:0; font-family:var(--sans); font-size:13px;
+    letter-spacing:.04em; color:var(--muted); padding:12px 2px 10px; cursor:pointer;
+    border-bottom:2px solid transparent; margin-bottom:-1px; white-space:nowrap;}
+  nav.topnav button.on{color:var(--ink); border-bottom-color:var(--ink); font-weight:600;}
+  nav.topnav button svg{vertical-align:-3px; margin-right:6px;}
+  section.page{display:none; padding-top:6px;}
+  section.page.on{display:block;}
+  .sec{padding:22px 0; border-bottom:1px solid var(--line);}
+  .sec:last-child{border-bottom:0;}
+  .kicker{font-family:var(--mono); font-size:11px; letter-spacing:.14em;
+    color:var(--muted); text-transform:uppercase; margin-bottom:14px;}
+  .kicker .n{color:var(--acc); margin-right:8px;}
+  h2.title{font-family:var(--serif); font-weight:400; font-size:22px; margin-bottom:4px;}
+  .sub{color:var(--muted); font-size:13.5px; margin-bottom:14px;}
+  label.lbl{display:block; font-size:12px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--muted); margin:16px 0 7px;}
+  input[type=text], select{width:100%; background:var(--surface); border:1px solid var(--line-dark);
+    color:var(--ink); border-radius:8px; padding:11px 12px; font-size:15px; outline:none; font-family:var(--sans);}
+  input:focus, select:focus{border-color:var(--muted);}
+  input::placeholder{color:#5C564A;}
+  .linkrow{display:flex; gap:8px; margin-bottom:8px;}
+  .linkrow input{flex:1; font-family:var(--mono); font-size:13px;}
+  .linkrow .st{font-size:12px; color:var(--muted); margin-top:2px; min-height:18px;}
+  .xbtn{background:none; border:1px solid var(--line); border-radius:8px; color:var(--muted);
+    width:42px; font-size:15px; cursor:pointer;}
+  .xbtn:hover{color:var(--err); border-color:var(--err);}
+  .addrow{background:none; border:0; color:var(--acc); font-size:14px; cursor:pointer; padding:6px 0;}
+  .addrow:hover{text-decoration:underline;}
+  .seg{display:flex; border:1px solid var(--line-dark); border-radius:8px; overflow:hidden; background:var(--surface);}
+  .seg button{flex:1; background:none; border:0; border-right:1px solid var(--line);
+    padding:10px 0; font-size:14px; color:var(--muted); cursor:pointer; font-family:var(--sans);}
+  .seg button:last-child{border-right:0;}
+  .seg button.on{background:var(--ink); color:#161513; font-weight:600;}
+  .cta{width:100%; background:var(--ink); border:0; color:#161513; font-size:15px;
+    font-weight:700; letter-spacing:.02em; border-radius:8px; padding:13px; margin-top:18px; cursor:pointer;}
+  .cta:hover{background:#fff;}
+  .cta:disabled{opacity:.5; cursor:wait;}
+  .btn2{flex:1; background:none; border:1px solid var(--line-dark); color:var(--ink);
+    border-radius:8px; padding:10px; font-size:13.5px; cursor:pointer;}
+  .btn2:hover{border-color:var(--muted);}
+  .btn2.danger{color:var(--err); border-color:#5A2B28;}
+  .btnrow{display:flex; gap:8px; margin-top:12px;}
+  .job{padding:14px 0; border-bottom:1px solid var(--line);}
+  .job:last-child{border-bottom:0; padding-bottom:2px;}
+  .job .t{font-family:var(--serif); font-size:16.5px; line-height:1.35;}
+  .job .d{font-size:12.5px; color:var(--muted); margin-top:2px;}
+  .job .d code{font-family:var(--mono); font-size:11.5px;}
+  .rule{height:2px; background:var(--line); margin-top:10px; position:relative;}
+  .rule i{position:absolute; left:0; top:0; bottom:0; width:0; background:var(--ink); transition:width .8s linear;}
+  .rule.live i{background:var(--acc);}
+  .nums{display:flex; justify-content:space-between; flex-wrap:wrap; gap:4px 10px;
+    font-family:var(--mono); font-size:11.5px; color:var(--muted); margin-top:6px;
+    font-variant-numeric:tabular-nums;}
+  .statusline{font-size:12.5px; margin-top:6px;}
+  .statusline.run{color:var(--acc);}
+  .statusline.queue{color:var(--muted);}
+  .statusline.ok{color:var(--ok);}
+  .statusline.err{color:var(--err);}
+  .rowbtns{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
+  .mini{background:none; border:1px solid var(--line); border-radius:6px; color:var(--muted);
+    font-size:12.5px; padding:5px 12px; cursor:pointer;}
+  .mini:hover{color:var(--ink); border-color:var(--muted);}
+  .mini.danger:hover{color:var(--err); border-color:var(--err);}
+  .inline-form{display:flex; gap:8px; margin-top:4px;}
+  .inline-form input{flex:1;}
+  .inline-form button{background:var(--ink); color:#161513; border:0; border-radius:8px;
+    padding:0 20px; font-size:15px; cursor:pointer; font-weight:700;}
+  .chan{display:flex; align-items:baseline; gap:10px; padding:11px 0; border-bottom:1px solid var(--line);}
+  .chan:last-child{border-bottom:0;}
+  .chan .nm{flex:1; min-width:0;}
+  .chan .nm b{font-weight:600; font-size:14.5px;}
+  .chan .nm small{display:block; font-family:var(--mono); font-size:11px; color:var(--muted);}
+  .tag{font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; color:var(--muted);
+    border:1px solid var(--line-dark); border-radius:99px; padding:2px 9px; text-transform:uppercase;}
+  .tag.def{color:var(--acc); border-color:var(--acc);}
+  .drop{border:1px dashed var(--line-dark); border-radius:10px; padding:36px 16px;
+    text-align:center; color:var(--muted); cursor:pointer; background:var(--surface);}
+  .drop:hover{border-color:var(--muted); color:var(--ink);}
+  .drop svg{display:block; margin:0 auto 10px;}
+  .note{font-size:12.5px; color:var(--muted); margin-top:12px;}
+  .empty{color:var(--muted); font-size:14px; padding:8px 0;}
+  footer{max-width:620px; margin:0 auto; padding:18px 22px 26px; font-family:var(--mono);
+    font-size:10.5px; color:var(--muted); border-top:1px solid var(--line);}
+  nav.phonebar{display:none;}
+  @media (max-width:640px){
+    nav.topnav{display:none;}
+    .wrap{padding-bottom:110px;}
+    footer{display:none;}
+    nav.phonebar{display:flex; position:fixed; top:auto; bottom:0; left:0; right:0; z-index:10;
+      background:rgba(22,21,19,.97);
+      border-top:1px solid var(--line); padding:6px 4px calc(8px + env(safe-area-inset-bottom));}
+    nav.phonebar button{flex:1; background:none; border:0; color:var(--muted);
+      font-size:10.5px; letter-spacing:.03em; padding:6px 0; cursor:pointer;
+      display:flex; flex-direction:column; align-items:center; gap:4px;}
+    nav.phonebar button svg{margin:0; display:block;}
+    nav.phonebar button.on{color:var(--ink);}
+  }
+  @media (max-width:480px){
+    .mast h1{font-size:26px;}
+    .mast small{flex-basis:100%;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="mast">
+    <h1><span class="dot"></span>Video<em>downloader</em></h1>
+    <small>LAN · :8090</small>
+  </div>
+  <div class="offline" id="offline">Bot non raggiungibile — controlla che videobot sia attivo.</div>
+
+  <nav class="topnav" id="topnav">
+    <button data-p="p-dl" class="on">Download</button>
+    <button data-p="p-chan">Canali</button>
+    <button data-p="p-queue">Coda</button>
+    <button data-p="p-hist">Cronologia</button>
+    <button data-p="p-up">File</button>
+  </nav>
+
+  <section class="page on" id="p-dl">
+    <div class="sec">
+      <div class="kicker"><span class="n">01</span>Nuovo download</div>
+      <div id="links"></div>
+      <button class="addrow" id="addlink">+ Aggiungi link (batch)</button>
+      <label class="lbl" for="chansel">Canale</label>
+      <select id="chansel"></select>
+      <label class="lbl">Qualità</label>
+      <div class="seg" id="qseg">
+        <button data-q="360">360p</button>
+        <button data-q="720" class="on">720p</button>
+        <button data-q="1080">1080p</button>
+        <button data-q="max">Max</button>
+      </div>
+      <button class="cta" id="dlbtn">Scarica</button>
+      <div class="note" id="dlmsg"></div>
+    </div>
+    <div class="sec">
+      <div class="kicker"><span class="n">02</span>In corso</div>
+      <div id="livejobs"><div class="empty">Niente in corso.</div></div>
+    </div>
+    <div class="sec" id="confirmsec" style="display:none">
+      <div class="kicker"><span class="n">03</span>Da confermare</div>
+      <div id="confirmlist"></div>
+    </div>
+  </section>
+
+  <section class="page" id="p-chan">
+    <div class="sec">
+      <div class="kicker"><span class="n">01</span>I miei canali</div>
+      <div id="chanlist"><div class="empty">Caricamento…</div></div>
+    </div>
+    <div class="sec">
+      <div class="kicker"><span class="n">02</span>Collega canale</div>
+      <h2 class="title">Un nuovo canale in dieci secondi.</h2>
+      <p class="sub">ID numerico o @username. Il bot deve esserne admin.</p>
+      <div class="inline-form"><input type="text" id="newchan" placeholder="-100… oppure @nome"><button id="addchan" aria-label="Aggiungi">→</button></div>
+      <div class="note" id="chanmsg"></div>
+    </div>
+  </section>
+
+  <section class="page" id="p-queue">
+    <div class="sec">
+      <div class="kicker"><span class="n">01</span>Stato live</div>
+      <div id="qstatus"><div class="empty">Nessun download in corso.</div></div>
+      <div class="btnrow">
+        <button class="btn2 danger" id="stopbtn">Ferma corrente</button>
+        <button class="btn2" id="clearbtn">Svuota coda</button>
+      </div>
+    </div>
+    <div class="sec">
+      <div class="kicker"><span class="n">02</span>In attesa</div>
+      <div id="queuelist"><div class="empty">Coda vuota.</div></div>
+    </div>
+  </section>
+
+  <section class="page" id="p-hist">
+    <div class="sec">
+      <div class="kicker"><span class="n">01</span>Completati ed errori</div>
+      <div id="histlist"><div class="empty">Nessuna attività recente.</div></div>
+    </div>
+  </section>
+
+  <section class="page" id="p-up">
+    <div class="sec">
+      <div class="kicker"><span class="n">01</span>Dal dispositivo al canale</div>
+      <h2 class="title">Invia un file.</h2>
+      <p class="sub">Come /save: finisce dritto nel canale scelto.</p>
+      <div class="drop" id="drop">Trascina un video qui, oppure tocca per sceglierlo<input type="file" id="filepick" accept="video/*" style="display:none"></div>
+      <label class="lbl" for="chansel2">Canale</label>
+      <select id="chansel2"></select>
+      <button class="cta" id="upbtn">Invia al canale</button>
+      <div class="note" id="upmsg"></div>
+    </div>
+  </section>
+</div>
+<footer id="foot">videodownloader · solo rete di casa</footer>
+<nav class="phonebar" id="phonebar">
+  <button data-p="p-dl" class="on">Download</button>
+  <button data-p="p-chan">Canali</button>
+  <button data-p="p-queue">Coda</button>
+  <button data-p="p-hist">Crono</button>
+  <button data-p="p-up">File</button>
+</nav>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const t = await r.text();
+  try { return {status: r.status, body: JSON.parse(t)}; }
+  catch (e) { return {status: r.status, body: {ok: false, error: "bad response"}}; }
+}
+const get = p => api(p);
+const post = (p, b) => api(p, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(b || {})});
+
+/* tabs */
+$$("nav button").forEach(b => {
+  b.onclick = () => {
+    $$("nav button").forEach(x => x.classList.toggle("on", x.dataset.p === b.dataset.p));
+    $$(".page").forEach(x => x.classList.remove("on"));
+    document.getElementById(b.dataset.p).classList.add("on");
+    window.scrollTo(0, 0);
+  };
+});
+/* quality */
+let quality = "720";
+$$("#qseg button").forEach(b => {
+  b.onclick = () => {
+    $$("#qseg button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    quality = b.dataset.q;
+  };
+});
+/* link rows */
+function addLinkRow(value) {
+  const d = document.createElement("div");
+  d.className = "linkrow";
+  const inp = document.createElement("input");
+  inp.type = "text"; inp.placeholder = "https://…"; inp.value = value || "";
+  const st = document.createElement("div");
+  const btn = document.createElement("button");
+  btn.className = "xbtn"; btn.textContent = "×";
+  btn.onclick = () => d.remove();
+  d.appendChild(inp); d.appendChild(btn);
+  const wrap = document.createElement("div");
+  wrap.appendChild(d); wrap.appendChild(st);
+  $("#links").appendChild(wrap);
+  return {wrap, inp, st};
+}
+$("#addlink").onclick = () => addLinkRow("");
+addLinkRow("");
+/* state */
+let lastState = null;
+function fmtMB(mb) {
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + " GB";
+  return mb.toFixed(1) + " MB";
+}
+function jobTitle(it) { return it.title || it.url || "Video"; }
+function renderJobs(items, progress) {
+  const box = $("#livejobs");
+  box.textContent = "";
+  const jobs = items.filter(i => progress[i.url]);
+  if (!jobs.length) { box.innerHTML = ""; const e = document.createElement("div"); e.className = "empty"; e.textContent = "Niente in corso."; box.appendChild(e); return; }
+  jobs.forEach(it => {
+    const pr = progress[it.url] || {};
+    const pct = Math.max(0, Math.min(100, Number(pr.pct || 0)));
+    const row = document.createElement("div"); row.className = "job";
+    const info = document.createElement("div"); info.className = "jobinfo";
+    const t = document.createElement("div"); t.className = "t"; t.textContent = jobTitle(it);
+    const dd = document.createElement("div"); dd.className = "d";
+    dd.textContent = (it.quality || "") + (it.target_channel ? " · " + it.target_channel : "");
+    const rule = document.createElement("div"); rule.className = "rule live";
+    const fill = document.createElement("i"); fill.style.width = pct + "%";
+    rule.appendChild(fill);
+    const nums = document.createElement("div"); nums.className = "nums";
+    const left = document.createElement("span");
+    left.textContent = fmtMB(Number(pr.received || 0)) + " / " + fmtMB(Number(pr.total || 0));
+    const right = document.createElement("span"); right.textContent = Math.round(pct) + "%";
+    nums.appendChild(left); nums.appendChild(right);
+    const st = document.createElement("div"); st.className = "statusline run";
+    st.textContent = (pr.phase === "upload" ? "Upload" : "Download") + " in corso";
+    info.appendChild(t); info.appendChild(dd); info.appendChild(rule);
+    info.appendChild(nums); info.appendChild(st);
+    row.appendChild(info); box.appendChild(row);
+  });
+}
+function renderQueue(items) {
+  const box = $("#queuelist");
+  box.textContent = "";
+  if (!items.length) { const e = document.createElement("div"); e.className = "empty"; e.textContent = "Coda vuota."; box.appendChild(e); return; }
+  items.forEach((it, i) => {
+    const row = document.createElement("div"); row.className = "chan";
+    const nm = document.createElement("div"); nm.className = "nm";
+    const b = document.createElement("b"); b.textContent = (i + 1) + " · " + jobTitle(it);
+    const s = document.createElement("small");
+    s.textContent = (it.quality || "") + (it.target_channel ? " → " + it.target_channel : "");
+    nm.appendChild(b); nm.appendChild(s);
+    const up = document.createElement("button"); up.className = "mini"; up.textContent = "↑";
+    up.onclick = async () => { await post("api/priority", {url: it.url}); refresh(); };
+    const del = document.createElement("button"); del.className = "mini danger"; del.textContent = "×";
+    del.onclick = async () => { await post("api/cancel", {job: it.url}); refresh(); };
+    row.appendChild(nm); row.appendChild(up); row.appendChild(del);
+    box.appendChild(row);
+  });
+  const clr = $("#clearbtn");
+  clr.textContent = "Svuota coda (" + items.length + ")";
+}
+function renderStatus(current, progress) {
+  const box = $("#qstatus");
+  box.textContent = "";
+  if (!current) { const e = document.createElement("div"); e.className = "empty"; e.textContent = "Nessun download in corso."; box.appendChild(e); return; }
+  const pr = progress[current.url] || {};
+  const pct = Math.max(0, Math.min(100, Number(pr.pct || 0)));
+  const row = document.createElement("div"); row.className = "job";
+  const info = document.createElement("div"); info.className = "jobinfo";
+  const t = document.createElement("div"); t.className = "t"; t.textContent = jobTitle(current);
+  const rule = document.createElement("div"); rule.className = "rule live";
+  const fill = document.createElement("i"); fill.style.width = pct + "%";
+  rule.appendChild(fill);
+  info.appendChild(t); info.appendChild(rule); row.appendChild(info); box.appendChild(row);
+}
+function renderHistory(entries) {
+  const box = $("#histlist");
+  box.textContent = "";
+  if (!entries.length) { const e = document.createElement("div"); e.className = "empty"; e.textContent = "Nessuna attività recente."; box.appendChild(e); return; }
+  entries.slice(0, 20).forEach(en => {
+    const row = document.createElement("div"); row.className = "chan";
+    const nm = document.createElement("div"); nm.className = "nm";
+    const b = document.createElement("b"); b.textContent = en.title || en.url;
+    const s = document.createElement("small");
+    const d = en.ts ? new Date(en.ts * 1000).toLocaleDateString("it-IT") : "";
+    s.textContent = (en.status === "ok" ? "Inviato" : ("Errore: " + (en.error || "?")).slice(0, 90)) + (d ? " · " + d : "");
+    nm.appendChild(b); nm.appendChild(s);
+    const st = document.createElement("span");
+    st.className = "statusline " + (en.status === "ok" ? "ok" : "err");
+    st.textContent = en.status === "ok" ? "Inviato" : "Fallito";
+    row.appendChild(nm); row.appendChild(st);
+    if (en.status !== "ok") {
+      const rb = document.createElement("button"); rb.className = "mini"; rb.textContent = "Riprova";
+      rb.onclick = () => {
+        document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x.dataset.p === "p-dl"));
+        $$(".page").forEach(x => x.classList.remove("on"));
+        $("#p-dl").classList.add("on");
+        addLinkRow(en.url);
+        window.scrollTo(0, 0);
+      };
+      row.appendChild(rb);
+    }
+    box.appendChild(row);
+  });
+}
+function renderChannels(channels) {
+  const mk = sel => {
+    const el = $(sel);
+    el.textContent = "";
+    channels.forEach((c, i) => {
+      const o = document.createElement("option");
+      o.value = c.id;
+      o.textContent = c.label + (i === 0 ? " — predefinito" : "");
+      el.appendChild(o);
+    });
+  };
+  mk("#chansel"); mk("#chansel2");
+  const box = $("#chanlist");
+  box.textContent = "";
+  channels.forEach((c, i) => {
+    const row = document.createElement("div"); row.className = "chan";
+    const nm = document.createElement("div"); nm.className = "nm";
+    const b = document.createElement("b"); b.textContent = c.label;
+    const s = document.createElement("small"); s.textContent = c.id;
+    nm.appendChild(b); nm.appendChild(s);
+    row.appendChild(nm);
+    if (i === 0) {
+      const t = document.createElement("span"); t.className = "tag def"; t.textContent = "Predefinito";
+      row.appendChild(t);
+    } else {
+      const del = document.createElement("button"); del.className = "mini danger"; del.textContent = "Rimuovi";
+      del.onclick = async () => {
+        await fetch("api/channels/" + encodeURIComponent(c.id), {method: "DELETE"});
+        refresh();
+      };
+      row.appendChild(del);
+    }
+    box.appendChild(row);
+  });
+}
+function renderConfirms(entries) {
+  const known = entries.filter(e => e.status === "ok");
+  const sec = $("#confirmsec"), list = $("#confirmlist");
+  list.textContent = "";
+  window._knownOk = {};
+  known.forEach(e => { window._knownOk[e.url] = e; });
+  sec.style.display = "none";
+}
+async function refresh() {
+  let st;
+  try {
+    const r = await get("api/state");
+    if (r.status !== 200) throw new Error("http " + r.status);
+    st = r.body;
+  } catch (e) {
+    $("#offline").classList.add("on");
+    return;
+  }
+  $("#offline").classList.remove("on");
+  if (!st.ok) return;
+  lastState = st;
+  renderChannels(st.channels || []);
+  renderJobs(st.items || [], st.progress || {});
+  renderQueue((st.items || []).filter(i => !(st.progress || {})[i.url]));
+  renderStatus(st.current, st.progress || {});
+  renderHistory(st.history || []);
+  renderConfirms(st.history || []);
+}
+/* enqueue flow: preview -> confirm already-done -> enqueue with titles */
+$("#dlbtn").onclick = async () => {
+  const btn = $("#dlbtn"), msg = $("#dlmsg");
+  const rows = Array.from($("#links").children).map(w => ({
+    wrap: w, inp: w.querySelector("input"), st: w.querySelector("div:last-child")
+  }));
+  const urls = rows.map(r => r.inp.value.trim()).filter(Boolean);
+  if (!urls.length) { msg.textContent = "Incolla almeno un link."; return; }
+  btn.disabled = true; msg.textContent = "Analisi dei link…";
+  const sel = $("#chansel");
+  const channel = sel.options.length ? sel.value : "";
+  const titles = {};
+  const toQueue = [];
+  const known = (window._knownOk) || {};
+  const pendConfirm = [];
+  for (const r of rows) {
+    const u = r.inp.value.trim();
+    if (!u) continue;
+    r.st.textContent = "analisi…";
+    try {
+      const pr = await post("api/preview", {url: u});
+      if (!pr.body || pr.body.ok === false) { r.st.textContent = "Errore: " + ((pr.body && pr.body.error) || "?"); continue; }
+      const b = pr.body;
+      if (b.kind === "playlist") { r.st.textContent = "È una playlist: aprila dal bot per scegliere il video."; continue; }
+      titles[u] = b.title || u;
+      r.st.textContent = b.title || "";
+      if (b.fixed_quality) r.st.textContent += " (qualità unica)";
+      if (known[u]) { pendConfirm.push({url: u, title: titles[u]}); continue; }
+      toQueue.push(u);
+    } catch (e) {
+      r.st.textContent = "Analisi fallita.";
+    }
+  }
+  showConfirms(pendConfirm, titles, channel);
+  if (!toQueue.length) { btn.disabled = false; msg.textContent = pendConfirm.length ? "Alcuni link sono già stati scaricati: confermali sotto." : "Niente da accodare."; return; }
+  const q = await post("api/enqueue", {urls: toQueue, quality, channel, titles});
+  btn.disabled = false;
+  if (q.status !== 200 || !q.body.ok) { msg.textContent = "Errore di accodamento."; refresh(); return; }
+  const errs = q.body.results.filter(r => r.error);
+  msg.textContent = errs.length ? ("Accodati con " + errs.length + " errori.") : ("Accodati " + toQueue.length + " video.");
+  refresh();
+};
+function showConfirms(items, titles, channel) {
+  const sec = $("#confirmsec"), list = $("#confirmlist");
+  list.textContent = "";
+  if (!items.length) { sec.style.display = "none"; return; }
+  sec.style.display = "";
+  items.forEach(it => {
+    const row = document.createElement("div"); row.className = "job";
+    const info = document.createElement("div"); info.className = "jobinfo";
+    const t = document.createElement("div"); t.className = "t"; t.textContent = it.title;
+    const d = document.createElement("div"); d.className = "d"; d.textContent = "Già scaricato — ricaricare?";
+    const rb = document.createElement("div"); rb.className = "rowbtns";
+    const yes = document.createElement("button"); yes.className = "mini"; yes.textContent = "Sì, ricarica";
+    yes.onclick = async () => {
+      await post("api/enqueue", {urls: [it.url], quality, channel, titles});
+      row.remove(); refresh();
+    };
+    const no = document.createElement("button"); no.className = "mini"; no.textContent = "No";
+    no.onclick = () => row.remove();
+    rb.appendChild(yes); rb.appendChild(no);
+    info.appendChild(t); info.appendChild(d); info.appendChild(rb);
+    row.appendChild(info); list.appendChild(row);
+  });
+}
+/* channels add */
+$("#addchan").onclick = async () => {
+  const v = $("#newchan").value.trim();
+  const msg = $("#chanmsg");
+  if (!v) return;
+  const r = await post("api/channels", {id: v});
+  msg.textContent = r.body.ok ? "Canale collegato." : ("Errore: " + (r.body.error || "?"));
+  $("#newchan").value = "";
+  refresh();
+};
+/* queue ops */
+$("#stopbtn").onclick = async () => { await post("api/cancel", {}); refresh(); };
+$("#clearbtn").onclick = async () => { await post("api/clear", {}); refresh(); };
+/* upload */
+$("#drop").onclick = () => $("#filepick").click();
+$("#upbtn").onclick = async () => {
+  const f = $("#filepick").files[0];
+  const msg = $("#upmsg");
+  if (!f) { msg.textContent = "Scegli prima un file."; return; }
+  const sel = $("#chansel2");
+  const fd = new FormData();
+  fd.append("file", f);
+  if (sel.options.length) fd.append("channel", sel.value);
+  msg.textContent = "Invio in corso…";
+  try {
+    const r = await fetch("api/upload", {method: "POST", body: fd});
+    const b = await r.json();
+    msg.textContent = b.ok ? ("Accodato (posizione " + b.position + ").") : ("Errore: " + (b.error || "?"));
+  } catch (e) {
+    msg.textContent = "Invio fallito.";
+  }
+  refresh();
+};
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
