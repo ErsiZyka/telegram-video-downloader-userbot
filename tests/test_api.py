@@ -113,6 +113,35 @@ def test_move_and_clear(api):
     assert q["items"] == []
 
 
+def test_analyze_single_playlist_error(api, monkeypatch):
+    import bot.api as api_mod
+    monkeypatch.setattr(api_mod.h, "extract_info",
+                        lambda url: {"title": "T", "duration": 60,
+                                     "thumbnail": "http://t/x.jpg",
+                                     "webpage_url": url, "uploader": "u",
+                                     "filesize_approx": 10})
+    status, body = _call(api, "POST", "/api/analyze", {"url": "https://example.com/v"})
+    assert (status, body["kind"], body["title"]) == (200, "single", "T")
+    assert body["direct_url"] == "https://example.com/v"
+    monkeypatch.setattr(api_mod.h, "extract_info",
+                        lambda url: [{"title": "A", "webpage_url": "https://example.com/a"}])
+    status, body = _call(api, "POST", "/api/analyze", {"url": "https://example.com/pl"})
+    assert (status, body["kind"]) == (200, "playlist")
+    assert body["videos"][0]["webpage_url"] == "https://example.com/a"
+    status, _ = _call(api, "POST", "/api/analyze", {"url": "not-a-url"})
+    assert status == 400
+
+
+def test_analyze_extract_error(api, monkeypatch):
+    import bot.api as api_mod
+    from bot.downloader import ExtractError
+    def _boom(url):
+        raise ExtractError("nope")
+    monkeypatch.setattr(api_mod.h, "extract_info", _boom)
+    status, body = _call(api, "POST", "/api/analyze", {"url": "https://example.com/v"})
+    assert status == 200 and body["ok"] is False
+
+
 def test_history_recent(api):
     hist = h._get_history()
     hist.set_success("https://example.com/old", "f.mp4", "Old")

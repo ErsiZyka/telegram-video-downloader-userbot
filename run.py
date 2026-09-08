@@ -132,7 +132,7 @@ async def main() -> None:
     # to the bot through here instead of touching session/queue files.
     # Disabled with LOCAL_API_PORT=0/off.
     from bot.api import start_local_api
-    start_local_api()
+    start_local_api(asyncio.get_running_loop())
 
     await client.run_until_disconnected()  # type: ignore[misc]
     bot_log("Userbot fermato.")

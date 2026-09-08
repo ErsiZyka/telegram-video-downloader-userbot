@@ -14,6 +14,7 @@ Endpoints (all JSON, all require ``Authorization: Bearer <token>``):
     POST /api/cancel    -> {job?} cancels one job (or the current one)
     POST /api/move      -> {url} moves a queued job to the front
     POST /api/clear     -> {} empties the queue
+    POST /api/analyze   -> {url} previews a link (single/playlist/error)
     GET  /api/progress  -> {current, jobs}
     GET  /api/history?url=... -> history entry for a URL
     GET  /api/history/recent?limit=20 -> latest entries, ts desc
@@ -24,6 +25,7 @@ Disabled with ``LOCAL_API_PORT=0`` / ``off`` / empty.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import hmac
@@ -36,6 +38,8 @@ from urllib.parse import parse_qs, urlparse
 
 import bot.handlers as h
 from bot import progress as _progress
+from bot.downloader import ExtractError, VideoUnavailableError
+from bot.extractors import get_extractor
 from bot.logging_config import get_logger
 
 _log = get_logger("api")
@@ -157,6 +161,8 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/queue":
             self._handle_queue_add()
+        elif parsed.path == "/api/analyze":
+            self._handle_analyze()
         elif parsed.path == "/api/cancel":
             self._handle_cancel()
         elif parsed.path == "/api/move":
@@ -195,6 +201,29 @@ class _Handler(BaseHTTPRequestHandler):
         _log.info("API: accodato %s [%s] (pos %d)", title[:60], quality, pos)
         self._send(200, {"ok": True, "position": pos})
 
+    def _handle_analyze(self) -> None:
+        body = self._read_json()
+        url = str(body.get("url", "") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            self._send(400, {"ok": False, "error": "invalid url"})
+            return
+        loop = getattr(self.server, "bot_loop", None)
+        try:
+            if loop is None:
+                # Tests / inline use: drive the coroutine on a fresh loop.
+                result = asyncio.run(_do_analyze(url))
+            else:
+                fut = asyncio.run_coroutine_threadsafe(_do_analyze(url), loop)
+                result = fut.result(timeout=240)
+        except TimeoutError:
+            self._send(504, {"ok": False, "error": "analysis timeout"})
+            return
+        except Exception as e:
+            _log.warning("API analyze fallita: %r", e)
+            self._send(500, {"ok": False, "error": "analysis failed"})
+            return
+        self._send(200, result)
+
     def _handle_move(self) -> None:
         body = self._read_json()
         url = str(body.get("url", "") or "").strip()
@@ -228,16 +257,57 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "job": current})
 
 
+async def _do_analyze(url: str) -> dict:
+    """Analyze one link under the bot's extraction lock.
+
+    Single choke point for metadata so the site never hammers sites in
+    parallel with the bot (IP rate-limit bans). Dedicated extractor first,
+    then yt-dlp — the universal browser fallback stays with the worker.
+    """
+    extractor = get_extractor(url)
+    if extractor is not None:
+        try:
+            async with h._extract_lock:
+                finfo = await extractor.extract(url)
+        except Exception as e:
+            return {"ok": False, "error": f"extraction failed: {e}"}
+        return {"ok": True, "kind": "single",
+                "title": finfo.title or "Video", "duration": 0,
+                "thumbnail": "", "filesize_approx": 0,
+                "direct_url": finfo.url, "headers": finfo.headers or {},
+                "fixed_quality": bool(getattr(finfo, "fixed_quality", False)),
+                "page_url": url}
+    loop = asyncio.get_running_loop()
+    try:
+        async with h._extract_lock:
+            info = await loop.run_in_executor(None, h.extract_info, url)
+    except (ExtractError, VideoUnavailableError) as e:
+        return {"ok": False, "error": str(e)}
+    if isinstance(info, list):
+        return {"ok": True, "kind": "playlist", "url": url,
+                "videos": [{"title": v.get("title", "Sconosciuto"),
+                              "webpage_url": v.get("webpage_url", "")}
+                             for v in info]}
+    return {"ok": True, "kind": "single",
+            "title": info.get("title", "Sconosciuto"),
+            "duration": info.get("duration", 0),
+            "thumbnail": info.get("thumbnail", ""),
+            "filesize_approx": info.get("filesize_approx", 0),
+            "direct_url": url, "headers": {}, "fixed_quality": False,
+            "page_url": url}
+
+
 def create_server(host: str = "127.0.0.1", port: int = 0,
-                  token: str = "") -> ThreadingHTTPServer:
+                  token: str = "", loop=None) -> ThreadingHTTPServer:
     """Build (not yet serving) the API server. ``port=0`` = ephemeral."""
     server = ThreadingHTTPServer((host, port), _Handler)
     server.api_token = token or _load_or_create_token()  # type: ignore[attr-defined]
+    server.bot_loop = loop  # type: ignore[attr-defined]
     server.daemon_threads = True
     return server
 
 
-def start_local_api() -> ThreadingHTTPServer | None:
+def start_local_api(loop=None) -> ThreadingHTTPServer | None:
     """Start the API in a daemon thread from env config. None = disabled."""
     raw_port = os.getenv("LOCAL_API_PORT", "8091").strip().lower()
     if raw_port in ("", "0", "off", "no", "false"):
@@ -254,7 +324,7 @@ def start_local_api() -> ThreadingHTTPServer | None:
         _log.warning("LOCAL_API_HOST %r non-loopback: forzo 127.0.0.1", host)
         host = "127.0.0.1"
     try:
-        server = create_server(host, port, "")
+        server = create_server(host, port, "", loop)
     except OSError as e:
         _log.warning("API locale non avviata (%r)", e)
         return None
