@@ -1,0 +1,16 @@
+[Unit]
+Description=Video Downloader Website
+After=videobot.service
+Wants=videobot.service
+
+[Service]
+Type=simple
+User=ersi
+WorkingDirectory=/home/ersi/condivisa/video_downloader_bot
+Environment="PATH=/home/ersi/condivisa/video_downloader_bot/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/home/ersi/condivisa/video_downloader_bot/venv/bin/python -m uvicorn webapp:app --host 0.0.0.0 --port 8090
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

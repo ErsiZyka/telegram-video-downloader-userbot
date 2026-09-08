@@ -12,3 +12,4 @@ log
 data/*.log*
 nohup.out
 panel.env
+data/.local_api_token
