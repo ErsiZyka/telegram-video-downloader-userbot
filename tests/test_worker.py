@@ -40,7 +40,9 @@ async def test_worker_uses_target_channel(tmp_path, monkeypatch):
     task = asyncio.create_task(h._queue_worker(_FakeClient(), -1000, 111))
     try:
         assert await _drain(calls, "channel")
-        assert calls["channel"] == "-1009"
+        # Il worker normalizza gli ID numerici in int (Telethon risolve
+        # le stringhe "-100.." come username e fallisce).
+        assert calls["channel"] == -1009
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -66,7 +68,7 @@ async def test_worker_upload_kind(tmp_path, monkeypatch):
     task = asyncio.create_task(h._queue_worker(_FakeClient(), -1000, 111))
     try:
         assert await _drain(up, "channel")
-        assert (up["channel"], up["filepath"]) == ("-1007", str(f))
+        assert (up["channel"], up["filepath"]) == (-1007, str(f))
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

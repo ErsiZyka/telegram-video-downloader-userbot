@@ -135,6 +135,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "current": _progress.get_current_job(),
                 "jobs": _progress.all_progress(),
             })
+        elif parsed.path == "/api/history":
+            url = parse_qs(parsed.query).get("url", [""])[0]
+            entry = h._get_history().get(url) if url else None
+            if entry is None:
+                self._send(404, {"ok": False, "error": "not found"})
+            else:
+                self._send(200, {"ok": True, "entry": entry})
         elif parsed.path == "/api/history/recent":
             try:
                 limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])

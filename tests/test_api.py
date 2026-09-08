@@ -85,7 +85,8 @@ def test_cancel_job_drops_queued_item(api):
 
 def test_history_missing_is_404(api):
     status, body = _call(api, "GET", "/api/history?url=https://example.com/nope")
-    assert status == 404
+    # Deve essere il 404 dell'endpoint (entry assente), non dell'endpoint mancante.
+    assert status == 404 and body["error"] == "not found"
 
 
 def test_queue_add_passthrough_extras(api):

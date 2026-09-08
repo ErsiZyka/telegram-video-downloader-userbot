@@ -123,6 +123,26 @@ class SlowUploadError(Exception):
     pass
 
 
+def _normalize_channel(value, default) -> int | str:
+    """Normalize a channel reference to what Telethon resolves.
+
+    Numeric IDs may arrive as strings (JSON from the website): Telethon
+    treats "-100.." strings as usernames and fails, so convert them to
+    int. @usernames pass through untouched. Anything else -> default.
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, int):
+        return value
+    s = str(value).strip()
+    if s.startswith("@"):
+        return s
+    try:
+        return int(s)
+    except ValueError:
+        return default
+
+
 def _job_cancelled(url: str | None) -> bool:
     """True se /stop globale o un cancel per-job riguarda questo URL."""
     if _cancel_requested:
@@ -331,7 +351,7 @@ async def download_and_upload(
     url: str,
     quality: str,
     title: str,
-    channel_id: int,
+    channel_id: int | str,
     owner_id: int,
     max_retries: int = 3,
     headers: dict | None = None,
@@ -735,7 +755,8 @@ async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
             kind = item.get("kind", "web")
             # Per-job destination (website multi-channel): falls back to the
             # bot's default channel when the item carries no target.
-            target = item.get("target_channel") or channel_id
+            # Normalized: numeric IDs may arrive as strings via JSON.
+            target = _normalize_channel(item.get("target_channel"), channel_id)
             if kind == "saved":
                 await download_and_upload_saved(
                     client, status_msg, item, target, owner_id
@@ -807,7 +828,7 @@ async def _upload_existing(
     status_msg,
     filepath: str,
     title: str,
-    channel_id: int,
+    channel_id: int | str,
     url: str = "",
     max_retries: int = 2,
 ) -> None:
