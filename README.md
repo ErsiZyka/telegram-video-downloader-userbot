@@ -51,7 +51,7 @@ every step is logged to both console and a rotating log file.
   uses `peek()` + `remove()` (not `pop()`), so if the bot crashes mid-download the item stays
   in the queue and is reprocessed on the next start (yt-dlp resumes the `.part` files).
 - **Universal 3-level extraction** — dedicated extractors → `yt-dlp` → universal Playwright
-  fallback that handles **80+ free-tube sites**.
+  fallback that handles **dozens of video sites**.
 - **Parallel upload via FastTelethon** — many TCP connections at once, up to 10–20 MB/s, sent
   as a **reproducible MP4** (real metadata probed with `ffprobe` so Telegram shows streaming +
   thumbnail) with a clickable caption linking back to the original video and site.
@@ -89,7 +89,7 @@ every step is logged to both console and a rotating log file.
 
 ## Requirements
 
-- **Python 3.10+** (developed on 3.12)
+- **Python 3.10+** (tested on 3.12–3.14)
 - **ffmpeg** and **ffprobe** (audio/video merge + metadata probing)
 - **yt-dlp** (installed via `requirements.txt`)
 - **Playwright + Chromium** (for streaming-site extractors — `playwright install chromium`)
@@ -133,6 +133,7 @@ for you:
 ```bash
 ./setup.sh        # Linux / Termux
 ```
+
 ```bat
 setup.bat         # Windows
 ```
@@ -163,6 +164,7 @@ You need four things:
 ```bash
 ./start_bot.sh        # Linux (runs inside a `screen` session)
 ```
+
 ```bat
 start.bat             # Windows
 ```
@@ -179,7 +181,7 @@ Only you (`OWNER_ID`) can run these in a private chat with the userbot. **Send t
 — inline buttons don't work with userbots. For confirmation prompts, reply with `si` (`yes`).
 
 | Command | Description |
-|---------|-------------|
+| --------- | ------------- |
 | `/adduser @username` | Add a user to the whitelist (by username) |
 | `/adduser 123456789` | Add a user to the whitelist (by numeric ID) |
 | `/removeuser @username` | Remove a user from the whitelist |
@@ -201,18 +203,17 @@ Only you (`OWNER_ID`) can run these in a private chat with the userbot. **Send t
 The bot tries to get a video in three stages, from the cheapest to the most powerful:
 
 1. **Dedicated extractors** (`bot/extractors/`). Registered per-domain, tried first. Some are
-   lightweight HTTP/HTML parsers (e.g. the `hentaiworld` regex extractor); others launch
+   lightweight HTTP/HTML parsers; others launch
    **headless Chromium** via Playwright to defeat Cloudflare and capture the `m3u8`/MP4 stream
-   from the page's own player while the site handles its own tokens and cookies transparently
-   (`streamingcommunity`, `altadefinizione`, `beeg`).
+   from the page's own player while the site handles its own tokens and cookies transparently.
 2. **`yt-dlp`** (the default engine). For everything without a dedicated extractor —
-   YouTube, TikTok, Instagram, Twitter/X, Vimeo, YouPorn and hundreds more. `yt-dlp` runs
+   YouTube, TikTok, Instagram, Twitter/X, Vimeo and hundreds more. `yt-dlp` runs
    `extract_info` to get metadata and then downloads the chosen quality.
 3. **Universal Playwright fallback** (`bot/extractors/universal.py`). Used *only* when
    `yt-dlp` fails (broken/outdated extractor, Cloudflare 403, etc.). It loads the page in
-   headless Chromium and intercepts the first stream the page itself plays — covering **80+
-   free-tube sites** with no per-site code. Sites whose `yt-dlp` extractor works never pay the
-   browser cost.
+headless Chromium and intercepts the first stream the page itself plays — covering dozens
+of video sites with no per-site code. Sites whose `yt-dlp` extractor works never pay the
+browser cost.
 
 > **Note:** the fallback (and the streaming-site extractors) need a browser installed:
 > `playwright install chromium`. On environments where Playwright/Chromium is unavailable
@@ -228,15 +229,18 @@ resend the parent page.
 ## Supported sites
 
 ### Via `yt-dlp` (native)
-YouTube, TikTok, Instagram, Twitter/X, Vimeo, YouPorn and
+
+YouTube, TikTok, Instagram, Twitter/X, Vimeo and
 [hundreds more](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
 
 ### Via dedicated / universal Playwright extractors
-`streamingcommunity` · `altadefinizione` — plus a universal fallback covering 80+ free-tube
-sites including pornhub.com, xvideos.com, xnxx.com, xhamster.com, redtube.com, spankbang.com,
-youporn.com, tube8.com, eporner.com, and many more (see `bot/extractors/universal.py`).
+
+Streaming sites protected by Cloudflare (movie/series portals and similar) plus a
+universal fallback that covers dozens of video sites with no per-site code
+(see `bot/extractors/universal.py`).
 
 ### Adding a new site
+
 To add a dedicated Playwright extractor, create `bot/extractors/yoursite.py`:
 
 ```python
@@ -257,7 +261,7 @@ All settings live in `.env` (see `.env.example`). Required: `API_ID`, `API_HASH`
 `OWNER_ID`, and one of `CHANNEL_ID` / `CHANNEL_USERNAME`.
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| ---------- | --------- | ------------- |
 | `API_ID` | — | **Required.** From [my.telegram.org](https://my.telegram.org) |
 | `API_HASH` | — | **Required.** From [my.telegram.org](https://my.telegram.org) |
 | `SESSION_NAME` | `my_video_downloader_bot` | Base name of the `.session` file |
@@ -267,18 +271,18 @@ All settings live in `.env` (see `.env.example`). Required: `API_ID`, `API_HASH`
 | `OWNER_ID` | — | **Required.** Your Telegram numeric ID |
 | `DOWNLOAD_DIR` | `downloads/` | Temporary folder for downloading files |
 | `MAX_RETRIES` | `3` | Download/upload retry attempts before giving up (with exponential backoff) |
-| `MAX_FILE_SIZE_GB` | `2` | Max file size, in GB. The bot hard-checks against Telegram's **2 GB** limit before uploading |
+| `MAX_FILE_SIZE_GB` | `2` | Max file size, in GB. Enforced **before** downloading (when the source reports it) and re-checked after — rejects anything over the limit instead of wasting bandwidth |
 | `PROGRESS_UPDATE_INTERVAL` | `2` | Target interval between progress updates (the bot also throttles edits to avoid FloodWait) |
 
 **Network / download tuning:**
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| ---------- | --------- | ------------- |
 | `COOKIES_FROM_BROWSER` | empty | Browser name from which to load YouTube cookies: `chrome` \| `edge` \| `firefox` \| `brave` \| `chromium` \| `opera` \| `vivaldi` \| `whale`. **Fixes YouTube's "Sign in to confirm you're not a bot"** |
 | `COOKIES_FILE` | `data/cookies.txt` | Path to a `cookies.txt` (export with a "Get cookies.txt LOCALLY" browser extension). Takes priority over `COOKIES_FROM_BROWSER` |
 | `FORCE_IPV4` | `true` | Force IPv4 connections — recommended on Linux to avoid YouTube/Cloudflare blocks |
 | `USE_ARIA2` | `true` | Use the multi-threaded `aria2c` for direct HTTP/FTP downloads (helpful on weak CPUs). Falls back to the native downloader if `aria2c` isn't installed |
-| `CONCURRENT_FRAGMENTS` | `16` | Number of fragments downloaded in parallel for HLS/DASH. Lower to 3–8 on weak CPUs or slow connections |
+| `CONCURRENT_FRAGMENTS` | `24` | Number of fragments downloaded in parallel for HLS/DASH. Lower to 3–8 on weak CPUs or slow connections |
 | `HTTP_CHUNK_SIZE` | empty | HTTP chunk size for the native yt-dlp downloader (speeds up single-file CDN pulls); e.g. `10485760` for 10 MB |
 | `IMPERSONATE` | `chrome` | TLS fingerprint impersonation via `curl_cffi` (set to `none`/`off` to disable). Defeats Cloudflare/Akamai 403 blocks |
 
@@ -286,14 +290,18 @@ All settings live in `.env` (see `.env.example`). Required: `API_ID`, `API_HASH`
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SLOW_START_GRACE` | `8` | Seconds to observe a download before judging it "slow". If it stays below `SLOW_START_MIN_KB` KB/s for this long, the bot restarts with more concurrent connections |
+| `SLOW_START_GRACE` | `12` | Seconds to observe a download before judging it "slow". If it stays below `SLOW_START_MIN_KB` KB/s for this long, the bot restarts with more concurrent connections |
 | `SLOW_START_MIN_KB` | `250` | Minimum sustained throughput (KB/s) required during the grace period to avoid a slow-start restart |
 
 **Playwright:**
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| ---------- | --------- | ------------- |
 | `PLAYWRIGHT_BROWSERS_PATH` | default cache | Where Playwright looks for its browsers (defaults to `~/.cache/ms-playwright` on Linux, `%LOCALAPPDATA%\ms-playwright` on Windows). Set if you installed Chromium elsewhere |
+| `PLAYWRIGHT_SHARED_BROWSER` | `1` | Reuse one Chromium process across extractions (faster, less RAM). Set to `0` for one browser per extraction |
+| `LOCAL_API_PORT` | `8091` | Local control API (localhost only) for dashboards/tooling: queue, progress, cancel. Set to `0` to disable |
+| `LOCAL_API_HOST` | `127.0.0.1` | Bind address for the local API (loopback only — never exposed) |
+| `LOCAL_API_TOKEN` | auto-generated | Bearer token for the local API. If empty, one is generated and stored in `data/.local_api_token` |
 
 ---
 
@@ -364,14 +372,16 @@ screen -ls                     # list sessions
 Turn an old Android phone into a free 24/7 host:
 
 1. Install **Termux from F-Droid** (not the Play Store — it's outdated):
-   https://f-droid.org/packages/com.termux/
+   <https://f-droid.org/packages/com.termux/>
 2. Open Termux and run:
+
    ```bash
    pkg update -y && pkg install -y git
    git clone https://github.com/ErsiZyka/telegram-video-downloader-userbot.git
    cd telegram-video-downloader-userbot
    bash setup_termux.sh
    ```
+
 3. Edit `.env` with your values (`nano .env`).
 4. Either copy your `my_video_downloader_bot.session` from your PC to the bot folder, or log
    in on first start.
@@ -379,6 +389,7 @@ Turn an old Android phone into a free 24/7 host:
    doesn't kill the process.
 
 For auto-start on phone reboot, install **Termux:Boot** (F-Droid) and:
+
 ```bash
 mkdir -p ~/.termux/boot
 cp start_termux.sh ~/.termux/boot/run-bot.sh
@@ -393,7 +404,7 @@ cp start_termux.sh ~/.termux/boot/run-bot.sh
 ## Troubleshooting
 
 | Problem | Fix |
-|---------|-----|
+| --------- | ----- |
 | **`yt-dlp non è installato` / "yt-dlp not installed" at startup** | `pip install yt-dlp` (or reinstall `requirements.txt`). The bot checks at startup and exits otherwise |
 | **`ffmpeg non è installato` / "ffmpeg not installed"** | Install ffmpeg + ffprobe (Ubuntu: `sudo apt install ffmpeg`; Windows: ffmpeg.org or `choco install ffmpeg`). The bot refuses to start without it |
 | **"Sign in to confirm you're not a bot" on YouTube** | Set `COOKIES_FROM_BROWSER=chrome` (or `edge`/`firefox`/...) in `.env` to the browser where you're logged into YouTube, or export cookies to a file and set `COOKIES_FILE` |
@@ -413,7 +424,8 @@ cp start_termux.sh ~/.termux/boot/run-bot.sh
 python -m pytest tests/ -v
 ```
 
-The suite covers the downloader, queue, whitelist, extractor registry, handlers and the full
+The suite (130+ tests) covers the downloader, queue, whitelist, extractor registry,
+handlers, the local control API, per-job progress, the upload-size cap and the full
 link → menu → download flow.
 
 ---
@@ -424,7 +436,8 @@ link → menu → download flow.
 telegram-video-downloader-userbot/
 ├── .env.example              # Configuration template
 ├── run.py                    # Entry point
-├── requirements.txt
+├── requirements.txt          # Loose dependencies (pip install)
+├── requirements.lock         # Pinned versions (reproducible installs)
 ├── start_bot.sh              # Linux start (screen)
 ├── start.bat                 # Windows start
 ├── start_with_log.bat        # Windows start + live log window
@@ -435,6 +448,8 @@ telegram-video-downloader-userbot/
 ├── install_warp.sh           # Optional: Cloudflare WARP helper
 ├── bot/
 │   ├── client.py             # Telethon client factory (session isolation)
+│   ├── api.py                # Local control API (localhost only, for dashboards)
+│   ├── progress.py           # Per-job progress + cancel registries
 │   ├── handlers.py           # Message handlers, menus, queue worker, admin commands
 │   ├── downloader.py         # yt-dlp wrapper, retry, progress, slow-start, ffprobe
 │   ├── fasttelethon.py       # Parallel chunk upload (FastTelethon)
@@ -444,16 +459,12 @@ telegram-video-downloader-userbot/
 │   ├── whitelist.py          # Authorized-users gatekeeper
 │   └── extractors/
 │       ├── __init__.py       # Extractor registry
-│       ├── base.py           # Base + PlaywrightVideoExtractor + VideoInfo
-│       ├── altadefinizione.py
-│       ├── streamingcommunity.py
-│       ├── beeg.py
-│       ├── hentaiworld.py
-│       ├── tube8.py
-│       └── universal.py      # 80+ site Playwright fallback
+│       ├── base.py           # Base + PlaywrightVideoExtractor (shared browser)
+│       ├── <site>.py         # One module per supported site
+│       └── universal.py      # Multi-site Playwright fallback
 ├── data/                     # Runtime JSON/session/logs (gitignored)
 ├── downloads/                # Temp download dir (gitignored)
-└── tests/                    # Pytest suite
+└── tests/                    # Pytest suite (downloader, queue, api, flow, …)
 ```
 
 ---
