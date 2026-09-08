@@ -21,7 +21,9 @@ from telethon.tl.types import (
     PeerChannel,
 )
 
+from bot import progress as _progress
 from bot.downloader import (
+    CancelDownload,
     DownloadError,
     ExtractError,
     VideoUnavailableError,
@@ -32,6 +34,8 @@ from bot.downloader import (
     format_eta,
     format_size,
     format_speed,
+    get_max_file_size_bytes,
+    is_over_limit,
     probe_video_metadata,
 )
 from bot.extractors import get_extractor, get_universal_fallback
@@ -77,8 +81,13 @@ def _set_progress(
     total: float,
     speed: float = 0.0,
     eta: float = 0.0,
+    job: str | None = None,
 ) -> None:
-    """Aggiorna lo stato live, anche quando il callback gira in un thread."""
+    """Aggiorna lo stato live, anche quando il callback gira in un thread.
+
+    ``job=None`` usa il job corrente del worker; lo stato resta consultabile
+    per-job (API/sito) oltre che come singolo globale legacy (/status).
+    """
     global _progress_state
     _progress_state = {
         "phase": phase,
@@ -90,12 +99,16 @@ def _set_progress(
         "eta": eta,
         "ts": time_module.time(),
     }
+    _progress.set_progress(
+        job, phase, title, pct, received, total, speed, eta
+    )
 
 
-def _clear_progress() -> None:
-    """Azzera lo stato quando l'item termina."""
+def _clear_progress(job: str | None = None) -> None:
+    """Azzera lo stato quando l'item termina (legacy + per-job)."""
     global _progress_state
     _progress_state = None
+    _progress.clear_progress(job)
 
 
 QUALITY_CHOICES = {
@@ -106,12 +119,15 @@ QUALITY_CHOICES = {
 }
 
 
-class CancelDownload(Exception):
-    pass
-
-
 class SlowUploadError(Exception):
     pass
+
+
+def _job_cancelled(url: str | None) -> bool:
+    """True se /stop globale o un cancel per-job riguarda questo URL."""
+    if _cancel_requested:
+        return True
+    return _progress.is_cancelled(url)
 
 
 def _get_history() -> DownloadHistory:
@@ -337,7 +353,7 @@ async def download_and_upload(
 
         def download_progress(downloaded_mb, total_mb, speed_mbps, eta) -> None:
             nonlocal last_progress, last_log_progress
-            if _cancel_requested:
+            if _job_cancelled(url):
                 raise CancelDownload("stop")
             now = time_module.time()
             pct = (downloaded_mb / total_mb * 100) if total_mb > 0 else 0
@@ -377,58 +393,54 @@ async def download_and_upload(
         filepath = None
         download_error = None
 
-        for attempt in range(1, max_retries + 1):
-            if _cancel_requested:
+        # Un solo tentativo esterno: i retry con backoff vivono DENTRO
+        # download_video, dove lo stato di yt-dlp (boost frammenti, header
+        # browser, fallback di formato) si conserva tra un tentativo e
+        # l'altro. Prima c'erano due livelli (esterno x3 con inner=1) e il
+        # boost slow-start andava perso a ogni tentativo.
+        _progress.set_current_job(url)
+        if _job_cancelled(url):
+            cleanup_orphan_files()
+            await _safe_edit(status_msg, "🛑 Download annullato.")
+            return "cancelled"
+        try:
+            filepath = await loop.run_in_executor(
+                None,
+                download_video,
+                url,
+                quality,
+                download_progress,
+                max_retries,
+                headers,
+                title,
+            )
+            _log(f"Download completato: {filepath}")
+        except CancelDownload:
+            cleanup_orphan_files()
+            await _safe_edit(status_msg, "🛑 Download annullato.")
+            return "cancelled"
+        except DownloadError as e:
+            download_error = str(e)
+            _log(f"Download fallito dopo {max_retries} tentativi: {download_error}")
+        except Exception as e:
+            if _job_cancelled(url):
                 cleanup_orphan_files()
                 await _safe_edit(status_msg, "🛑 Download annullato.")
                 return "cancelled"
+            download_error = repr(e)
+            _log(f"Errore download: {download_error}")
+            cleanup_orphan_files()
+            await _safe_edit(status_msg, f"❌ Download fallito: {e}")
             try:
-                if attempt > 1:
-                    await _safe_edit(
-                        status_msg,
-                        f"⏳ Download (tentativo {attempt}/{max_retries})...",
-                    )
-                filepath = await loop.run_in_executor(
-                    None,
-                    download_video,
-                    url,
-                    quality,
-                    download_progress,
-                    1,
-                    headers,
-                    title,
-                )
-                _log(f"Download completato: {filepath}")
-                break
-            except CancelDownload:
-                cleanup_orphan_files()
-                await _safe_edit(status_msg, "🛑 Download annullato.")
-                return "cancelled"
-            except DownloadError as e:
-                download_error = str(e)
-                _log(f"Tentativo {attempt} fallito: {download_error}")
-                if attempt < max_retries:
-                    await asyncio.sleep(2 ** (attempt - 1))
-            except Exception as e:
-                if _cancel_requested:
-                    cleanup_orphan_files()
-                    await _safe_edit(status_msg, "🛑 Download annullato.")
-                    return "cancelled"
-                download_error = repr(e)
-                _log(f"Errore download (tentativo {attempt}): {download_error}")
-                cleanup_orphan_files()
-                await _safe_edit(status_msg, f"❌ Download fallito: {e}")
-                try:
-                    _get_history().set_error(url, str(e), title)
-                except Exception:
-                    _log("history save fallito (ignorato)")
-                return "error"
+                _get_history().set_error(url, str(e), title)
+            except Exception:
+                _log("history save fallito (ignorato)")
+            return "error"
 
-        if filepath is None:
-            # Il CDN rifiuta il download (403/forbidden) pur avendo yt-dlp
-            # estratto correttamente l'URL: riprova con il fallback browser,
-            # che ottiene un URL fresco + gli header anti-leech richiesti dal sito.
-            if _is_blocked_error(download_error or ""):
+        # Il CDN rifiuta il download (403/forbidden) pur avendo yt-dlp
+        # estratto correttamente l'URL: riprova con il fallback browser,
+        # che ottiene un URL fresco + gli header anti-leech richiesti dal sito.
+        if filepath is None and _is_blocked_error(download_error or ""):
                 fallback = get_universal_fallback(url)
                 if fallback is not None:
                     _log(
@@ -476,14 +488,17 @@ async def download_and_upload(
 
         file_size_bytes = os.path.getsize(filepath) if os.path.exists(filepath) else 0
         file_size_mb = file_size_bytes / (1024 * 1024)
-        file_size_gb = file_size_mb / 1024
 
-        if file_size_gb > 2:
-            if os.path.exists(filepath):
-                os.remove(filepath)
+        if is_over_limit(file_size_bytes):
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except OSError as e:
+                _log(f"cleanup file grande fallito: {e!r}")
             await _safe_edit(
                 status_msg,
-                f"❌ File troppo grande ({file_size_gb:.1f} GB). Limite Telegram: 2GB",
+                f"❌ File troppo grande ({file_size_mb / 1024:.1f} GB). "
+                f"Limite Telegram: {get_max_file_size_bytes() / 1024**3:g}GB",
             )
             return "error"
 
@@ -501,7 +516,7 @@ async def download_and_upload(
 
         async def upload_progress(sent: int, total: int):
             nonlocal last_upload_progress
-            if _cancel_requested:
+            if _job_cancelled(url):
                 raise CancelDownload("stop")
             now = time_module.time()
             pct = (sent / total * 100) if total > 0 else 0
@@ -594,14 +609,14 @@ async def download_and_upload(
                 # lasciare il bot sordo per minuti (era causa di "sembra rotto").
                 waited = 0
                 while waited < e.seconds:
-                    if _cancel_requested:
+                    if _job_cancelled(url):
                         _log("FloodWait upload interrotto da /stop")
                         break
                     step = min(5, e.seconds - waited)
                     await asyncio.sleep(step)
                     waited += step
             except Exception as e:
-                if _cancel_requested:
+                if _job_cancelled(url):
                     if os.path.exists(filepath):
                         try:
                             os.remove(filepath)
@@ -667,6 +682,7 @@ async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
         url = item["url"]
         quality = item.get("quality", "720")
         title = item.get("title", "Video")
+        _progress.set_current_job(url)
         _set_progress("download", title, 0.0, 0.0, 0.0)
         headers = item.get("headers") or None
         _log(f"Worker processa: {url} [{quality}]")
@@ -719,6 +735,8 @@ async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
             # crash-safe property; on restart it gets reprocessed.
             queue.remove(url)
             _current_item = None
+            _progress.clear_cancel(url)
+            _progress.set_current_job(None)
             _clear_progress()
 
 
@@ -766,10 +784,13 @@ async def _upload_existing(
 
     file_size_bytes = os.path.getsize(filepath)
     file_size_mb = file_size_bytes / (1024 * 1024)
-    file_size_gb = file_size_mb / 1024
-    if file_size_gb > 2:
+    if is_over_limit(file_size_bytes):
         _clear_progress()
-        await _safe_edit(status_msg, f"❌ File troppo grande ({file_size_gb:.1f} GB).")
+        await _safe_edit(
+            status_msg,
+            f"❌ File troppo grande ({file_size_mb / 1024:.1f} GB). "
+            f"Limite: {get_max_file_size_bytes() / 1024**3:g}GB.",
+        )
         return
 
     caption = _build_caption(title, url)
@@ -863,7 +884,7 @@ async def _upload_existing(
             # Attesa cancellabile: stessa logica del download_and_upload.
             waited = 0
             while waited < e.seconds:
-                if _cancel_requested:
+                if _job_cancelled(url):
                     _log("FloodWait _upload_existing interrotto da /stop")
                     break
                 step = min(5, e.seconds - waited)
@@ -905,7 +926,10 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
     if media is None:
         return
     msg_file = getattr(msg, "file", None)
-    fname = getattr(msg_file, "name", None) if msg_file else None
+    raw_name = getattr(msg_file, "name", None) if msg_file else None
+    # Il nome puo' non essere una stringa (mock nei test, tipi Telethon
+    # inattesi): mai passarlo a re.sub senza controllo.
+    fname = raw_name if isinstance(raw_name, str) else None
     mime = getattr(msg_file, "mime_type", None) if msg_file else None
     if not fname:
         ext = {
@@ -928,7 +952,12 @@ async def _download_and_upload_saved_media(client, status_msg, msg, channel_id) 
         0
     ]
     title = title[:80]
-    os.makedirs("downloads", exist_ok=True)
+    try:
+        os.makedirs("downloads", exist_ok=True)
+    except OSError as e:
+        _log(f"cartella downloads non creabile: {e!r}")
+        await _safe_edit(status_msg, f"\u274c Cartella download non disponibile: {e}")
+        return
     loop = asyncio.get_running_loop()
     last_progress = [0.0]
 
@@ -1098,7 +1127,6 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
     Funziona per link pubblici (t.me/username/123) e canali privati dove
     l'account è membro (t.me/c/<id>/<msg>).
     """
-    user_id = event.sender_id
     match = TG_LINK_REGEX.match(url)
     if not match:
         await _safe_reply(
@@ -1110,7 +1138,11 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
 
     prefix = match.group("prefix")
     entity = match.group("entity")
-    msg_id = int(match.group("msg"))
+    try:
+        msg_id = int(match.group("msg"))
+    except (TypeError, ValueError):
+        await _safe_reply(event, "\u274c Link Telegram non valido.")
+        return
 
     status_msg = await _safe_reply(event, "🔍 Recupero del post Telegram...")
     if status_msg is None:
@@ -1127,7 +1159,8 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
                 try:
                     peer = await client.get_entity(PeerChannel(candidate))
                     break
-                except Exception:
+                except Exception as e:
+                    _log(f"candidato peer {candidate} fallito: {e!r}")
                     continue
             if peer is None:
                 raise ValueError("canale non risolvibile")
@@ -1158,8 +1191,10 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
 
     # ── Nome file ──
     fname = ""
-    if getattr(msg, "file", None) and msg.file.name:
-        fname = msg.file.name
+    _tg_file = getattr(msg, "file", None)
+    _tg_name = getattr(_tg_file, "name", None) if _tg_file else None
+    if isinstance(_tg_name, str) and _tg_name:
+        fname = _tg_name
     if not fname:
         ext = ".mp4"
         if isinstance(msg.media, MessageMediaPhoto):
@@ -1235,15 +1270,16 @@ async def _process_telegram_link(client, event, url: str, channel_id: int) -> No
         return
 
     size_mb = os.path.getsize(filepath) / (1024 * 1024)
-    if size_mb / 1024 > 2:
+    if is_over_limit(os.path.getsize(filepath)):
         _clear_progress()
         try:
             os.remove(filepath)
-        except Exception:
+        except OSError:
             _log("cleanup media grande fallito (ignorato)")
         await _safe_edit(
             status_msg,
-            f"❌ File troppo grande ({size_mb / 1024:.1f} GB). Limite Telegram: 2GB",
+            f"❌ File troppo grande ({size_mb / 1024:.1f} GB). "
+            f"Limite Telegram: {get_max_file_size_bytes() / 1024**3:g}GB",
         )
         return
 
@@ -1437,6 +1473,16 @@ async def _process_link(client, event, url: str, channel_id: int) -> None:
             await _send_playlist_menu(event, user_id, info, url, page=0)
         else:
             title = info.get("title", "Sconosciuto")
+            if is_over_limit(info.get("filesize_approx")):
+                approx_gb = (info.get("filesize_approx") or 0) / 1024**3
+                await _safe_delete(status_msg)
+                await _safe_reply(
+                    event,
+                    f"\u274c Video troppo grande (~{approx_gb:.1f} GB). "
+                    f"Limite Telegram: {get_max_file_size_bytes() / 1024**3:g}GB, "
+                    "non lo scarico.",
+                )
+                return
             await _safe_delete(status_msg)
             await _send_quality_menu(event, user_id, url, title)
     except VideoUnavailableError as e:

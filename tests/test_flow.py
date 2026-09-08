@@ -4,9 +4,9 @@ Mocks Telethon event objects so we can test the handlers logic without a live
 Telegram session.
 """
 import sys
-import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 sys.path.insert(0, ".")
 import bot.handlers as h
@@ -17,6 +17,9 @@ class FakeEvent:
     def __init__(self, text, user_id=111222333):
         self.message = MagicMock()
         self.message.text = text
+        # Un MagicMock ha TUTTI gli attributi truthy: senza questa riga ogni
+        # messaggio di solo testo sembrerebbe un media (bug del test, non del bot).
+        self.message.media = None
         self.message.id = id(self)
         self.message.reply = AsyncMock(return_value=self.message)
         self.message.edit = AsyncMock()
@@ -102,7 +105,7 @@ class TestFlow:
         with patch("bot.handlers.extract_info", return_value={"title": "New"}):
             await h.on_message(client, event, wl, channel_id=-100, owner_id=user_id)
         pending = h._get_pending(user_id)
-        assert pending["url"] == "https://new.url"
+        assert pending is not None and pending["url"] == "https://new.url"
 
     async def test_non_owner_ignored(self):
         event = FakeEvent("https://test.url", user_id=999999)

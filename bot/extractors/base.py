@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import contextlib
 import importlib
 import importlib.util
+import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 from playwright.async_api import async_playwright, Error as PlaywrightError
 
@@ -26,6 +30,137 @@ _CF_BODY_MARKERS = _CF_TITLE_MARKERS + (
     "checking your browser",
     "enable javascript and cookies",
 )
+
+# ── Shared Chromium ──────────────────────────────────────────────────────
+# Lanciare un browser da zero a ogni estrazione costa ~2-5s e ~200MB su
+# hardware debole. Un browser condiviso (un processo per modalita
+# headless: xinindia richiede headed) viene riusato; ogni estrazione apre
+# e chiude solo il proprio context (isolamento invariato). Kill-switch:
+# PLAYWRIGHT_SHARED_BROWSER=0 ripristina un browser dedicato per chiamata.
+_SHARED_PW: dict[bool, Any] = {}
+_SHARED_BROWSER: dict[bool, Any] = {}
+_SHARED_LOCK = asyncio.Lock()
+
+
+def _shared_browser_enabled() -> bool:
+    return (
+        os.getenv("PLAYWRIGHT_SHARED_BROWSER", "1").strip().lower()
+        not in ("0", "false", "no", "off")
+    )
+
+
+async def _acquire_shared_browser(headless: bool = True):
+    """Return the shared Chromium browser, launching it on first use.
+
+    Returns None when sharing is disabled or the launch fails: the caller
+    then falls back to a dedicated per-extraction browser (old behavior).
+    """
+    if not _shared_browser_enabled():
+        return None
+    async with _SHARED_LOCK:
+        browser = _SHARED_BROWSER.get(headless)
+        if browser is not None:
+            try:
+                if browser.is_connected():
+                    return browser
+            except Exception as e:
+                _log.debug("browser condiviso non valido: %r", e)
+            try:
+                await browser.close()
+            except Exception as e:
+                _log.debug("chiusura browser condiviso fallita: %r", e)
+            _SHARED_BROWSER.pop(headless, None)
+        try:
+            pw = _SHARED_PW.get(headless)
+            if pw is None:
+                pw = await async_playwright().start()
+                _SHARED_PW[headless] = pw
+            try:
+                browser = await pw.chromium.launch(
+                    headless=headless,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+            except Exception:
+                # Driver probabilmente morto con un loop precedente: ricostruiscilo.
+                pw = await async_playwright().start()
+                _SHARED_PW[headless] = pw
+                browser = await pw.chromium.launch(
+                    headless=headless,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+            _SHARED_BROWSER[headless] = browser
+            _log.info("Browser condiviso avviato (headless=%s)", headless)
+            return browser
+        except Exception as e:
+            _log.warning("Browser condiviso non disponibile (%r): uso dedicato", e)
+            return None
+
+
+@contextlib.asynccontextmanager
+async def _extraction_browser(headless: bool = True):
+    """Yield a browser for one extraction: shared when available.
+
+    Shared browsers are never closed here (restano per le prossime
+    estrazioni); dedicated ones are closed on exit as before.
+    """
+    browser = await _acquire_shared_browser(headless)
+    if browser is not None:
+        yield browser
+        return
+    async with async_playwright() as p:
+        _log.info("Avvio Chromium dedicato (shared non disponibile)")
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        try:
+            yield browser
+        finally:
+            try:
+                await browser.close()
+            except Exception as e:
+                _log.debug("chiusura browser dedicata fallita: %r", e)
+
+
+async def close_shared_browsers() -> None:
+    """Close shared browsers (tests, graceful shutdown)."""
+    async with _SHARED_LOCK:
+        for browser in _SHARED_BROWSER.values():
+            with contextlib.suppress(Exception):
+                await browser.close()
+        for pw in _SHARED_PW.values():
+            with contextlib.suppress(Exception):
+                await pw.stop()
+        _SHARED_BROWSER.clear()
+        _SHARED_PW.clear()
+
+
+def _close_shared_browsers_at_exit() -> None:
+    """Best-effort cleanup so restarts don't leak headless Chromium."""
+    browsers = list(_SHARED_BROWSER.values())
+    drivers = list(_SHARED_PW.values())
+    _SHARED_BROWSER.clear()
+    _SHARED_PW.clear()
+    if not browsers and not drivers:
+        return
+
+    async def _close_all() -> None:
+        for browser in browsers:
+            with contextlib.suppress(Exception):
+                await browser.close()
+        for pw in drivers:
+            with contextlib.suppress(Exception):
+                await pw.stop()
+
+    with contextlib.suppress(Exception):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_close_all())
+        finally:
+            loop.close()
+
+
+atexit.register(_close_shared_browsers_at_exit)
 
 
 @dataclass
@@ -183,12 +318,8 @@ class PlaywrightVideoExtractor(BaseExtractor):
                     future.set_result(u)
 
         try:
-            async with async_playwright() as p:
-                _log.info("Avvio Chromium headless per %s", url)
-                browser = await p.chromium.launch(
-                    headless=self.HEADLESS,
-                    args=["--disable-blink-features=AutomationControlled"],
-                )
+            async with _extraction_browser(self.HEADLESS) as browser:
+                _log.info("Estrazione browser per %s", url)
                 context = await browser.new_context(
                     user_agent=_STREAM_HEADERS["User-Agent"],
                     locale="it-IT",
@@ -248,7 +379,6 @@ class PlaywrightVideoExtractor(BaseExtractor):
                         _log.warning("Nessuno stream entro %ds dopo il click", self.AFTER_CLICK_WAIT)
 
                 await context.close()
-                await browser.close()
         except PlaywrightError as e:
             _log.error("Browser error: %s", e)
             raise RuntimeError(f"Browser error: {e}") from e

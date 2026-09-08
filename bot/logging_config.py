@@ -18,6 +18,22 @@ from logging.handlers import RotatingFileHandler
 _CONFIGURED = False
 
 
+class _TelegramNoiseFilter(logging.Filter):
+    """Drop Telethon's internal-outage spam (server-side, unactionable)."""
+
+    BLOCKED = (
+        "PersistentTimestampOutdatedError",
+        "Getting difference for channel updates",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        return not any(s in msg for s in self.BLOCKED)
+
+
 def setup_logging(log_dir: str = "data", level: int = logging.INFO) -> logging.Logger:
     """Configure root logging once: console + rotating file. Returns the bot logger."""
     global _CONFIGURED
@@ -25,8 +41,12 @@ def setup_logging(log_dir: str = "data", level: int = logging.INFO) -> logging.L
     if _CONFIGURED:
         return logger
 
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, "bot.log")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "bot.log")
+    except OSError as e:
+        print(f"WARN: cartella log non creabile ({e}), solo console")
+        log_path = None
 
     fmt = logging.Formatter(
         fmt="%(asctime)s %(levelname)-5s %(message)s",
@@ -38,16 +58,23 @@ def setup_logging(log_dir: str = "data", level: int = logging.INFO) -> logging.L
     console.setFormatter(fmt)
     console.setLevel(level)
 
-    # File handler -> persistent, rotates at 2 MB, keeps 3 backups.
-    file_h = RotatingFileHandler(
-        log_path, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
-    )
-    file_h.setFormatter(fmt)
-    file_h.setLevel(level)
+    handlers: list[logging.Handler] = [console]
+    if log_path is not None:
+        # File handler -> persistent, rotates at 2 MB, keeps 3 backups.
+        try:
+            file_h = RotatingFileHandler(
+                log_path, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
+            )
+        except OSError as e:
+            print(f"WARN: file di log non apribile ({e}), solo console")
+        else:
+            file_h.setFormatter(fmt)
+            file_h.setLevel(level)
+            handlers.append(file_h)
 
     logger.setLevel(level)
-    logger.addHandler(console)
-    logger.addHandler(file_h)
+    for hdl in handlers:
+        logger.addHandler(hdl)
     logger.propagate = False
 
     # Also capture third-party library logs at WARNING+ so yt-dlp / Telethon /
@@ -56,11 +83,17 @@ def setup_logging(log_dir: str = "data", level: int = logging.INFO) -> logging.L
         lib = logging.getLogger(name)
         lib.setLevel(logging.WARNING)
         if not lib.handlers:
-            lib.addHandler(console)
-            lib.addHandler(file_h)
+            for hdl in handlers:
+                lib.addHandler(hdl)
+
+    # Telethon's internals spam PersistentTimestampOutdatedError /
+    # GetChannelDifference warnings during Telegram-side outages: they fill
+    # the 2MB rotation and hide real errors. Drop just that noise.
+    logging.getLogger("telethon").addFilter(_TelegramNoiseFilter())
 
     _CONFIGURED = True
-    logger.info("Logging avviato (console + %s)", log_path)
+    dest = log_path if log_path is not None else "console"
+    logger.info("Logging avviato (%s)", dest)
     return logger
 
 

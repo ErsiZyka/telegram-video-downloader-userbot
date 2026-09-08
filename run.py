@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Telegram Video Downloader Userbot — Entry Point (Telethon)."""
 
-import os
-import sys
 import asyncio
 import logging
+import os
+import sys
 
-if os.name == "posix":
+if os.name == "posix" and ("TERMUX_VERSION" in os.environ or "termux" in sys.prefix):
+    # Solo Termux ha la configurazione OpenSSL rotta che fa crashare i
+    # motori JS esterni: su Ubuntu/server normali non toccare il TLS di sistema.
     os.environ["OPENSSL_CONF"] = "/dev/null"
 
 try:
@@ -22,6 +24,15 @@ from bot.whitelist import Whitelist
 from bot.downloader import check_dependencies
 from bot.history import DownloadHistory
 from bot.logging_config import setup_logging, bot_log
+
+# Lavora sempre dalla cartella del progetto: i path relativi (downloads/,
+# data/) e la sessione non dipendono piu dal cwd di avvio (systemd, cron o
+# shell manuale da $HOME creavano cartelle e sessioni duplicate).
+HERE = os.path.dirname(os.path.abspath(__file__))
+try:
+    os.chdir(HERE)
+except OSError as e:
+    print(f"WARN: chdir {HERE} fallito ({e}), proseguo con cwd corrente")
 
 
 def _load_config() -> dict:
@@ -66,7 +77,11 @@ async def main() -> None:
     setup_logging()
     config = _load_config()
     download_dir = config["download_dir"]
-    os.makedirs(download_dir, exist_ok=True)
+    try:
+        os.makedirs(download_dir, exist_ok=True)
+    except OSError as e:
+        print(f"ERRORE: cartella download non creabile ({e})")
+        sys.exit(1)
 
     bot_log("Verifica dipendenze...")
     deps_ok, deps_msg = check_dependencies()
@@ -89,7 +104,7 @@ async def main() -> None:
     from bot.handlers import register_handlers
     register_handlers(client, whitelist, config["channel_id"], config["owner_id"])
 
-    await client.start()
+    await client.start()  # type: ignore[misc]
     bot_log("Userbot avviato e in ascolto...")
     bot_log(f"   Canale: {config['channel_id']}")
     bot_log(f"   Owner ID: {config['owner_id']}")
@@ -113,7 +128,13 @@ async def main() -> None:
     from bot.handlers import start_queue_worker
     await start_queue_worker(client, config["channel_id"], config["owner_id"])
 
-    await client.run_until_disconnected()
+    # Local control API (localhost only): the future website and tooling talk
+    # to the bot through here instead of touching session/queue files.
+    # Disabled with LOCAL_API_PORT=0/off.
+    from bot.api import start_local_api
+    start_local_api()
+
+    await client.run_until_disconnected()  # type: ignore[misc]
     bot_log("Userbot fermato.")
 
 

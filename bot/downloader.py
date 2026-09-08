@@ -1,5 +1,16 @@
 """Wrapper around yt-dlp for video info extraction and downloading."""
 
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+import yt_dlp
+
+from bot.logging_config import get_logger
+
 QUALITY_FORMATS = {
     # "360" uses height<=480 fallback because some streaming CDNs (streamingcommunity/
     # vixcloud) only offer 480p as the lowest tier — there is no 360p variant.
@@ -10,8 +21,21 @@ QUALITY_FORMATS = {
 }
 
 
+# Magic strings matched against yt-dlp errors (named so the intent is clear).
+_FMT_NOT_AVAILABLE = "Requested format is not available"
+_VIDEO_NOT_AVAILABLE = "this video is not available"
+
+
 class DownloadError(Exception):
     """Raised when a download fails after all retries."""
+
+
+class CancelDownload(Exception):
+    """Cooperative cancellation: raised by progress callbacks on /stop.
+
+    Lives here (not in handlers) so the downloader can let it propagate
+    through yt-dlp progress hooks without importing the handler layer.
+    """
 
 
 class _SlowStartError(Exception):
@@ -47,9 +71,14 @@ def format_speed(mbps: float) -> str:
 
 def format_eta(seconds: int | None | float) -> str:
     """Format ETA as human-readable string."""
-    if seconds is None or seconds < 0:
+    if seconds is None:
         return "..."
-    seconds = int(seconds)
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return "..."
+    if seconds < 0:
+        return "..."
     if seconds == 0:
         return "0s"
     hours, remainder = divmod(seconds, 3600)
@@ -64,21 +93,56 @@ def format_eta(seconds: int | None | float) -> str:
     return " ".join(parts)
 
 
-import json
-import os
-import re
-import subprocess
-import sys
-
-import yt_dlp
-
 # Slow-start detector tuning (env-overridable)
-SLOW_START_GRACE_S = float(os.getenv("SLOW_START_GRACE", "8"))  # seconds to observe
-SLOW_START_MIN_BPS = (
-    float(os.getenv("SLOW_START_MIN_KB", "250")) * 1024
-)  # bytes/s threshold
+def _getenv_float(name: str, default: float) -> float:
+    """Read a float env var, falling back to default on garbage input."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
-from bot.logging_config import get_logger
+
+def _getenv_int(name: str, default: int) -> int:
+    """Read an int env var, falling back to default on garbage input."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_max_file_size_bytes() -> int:
+    """Upload size cap in bytes (env MAX_FILE_SIZE_GB, default 2GB).
+
+    Centralizes the Telegram limit so pre-checks (before download) and
+    post-checks (after download) can never disagree.
+    """
+    size_gb = _getenv_float("MAX_FILE_SIZE_GB", 2.0)
+    if not size_gb > 0:
+        size_gb = 2.0
+    try:
+        return int(size_gb * 1024**3)
+    except (OverflowError, ValueError):
+        return 2 * 1024**3
+
+
+def is_over_limit(size_bytes) -> bool:
+    """True if a known file size exceeds the upload cap.
+
+    Unknown sizes (0/None/unparsable) return False: the post-download
+    check remains the safety net.
+    """
+    if not size_bytes:
+        return False
+    try:
+        return float(size_bytes) > get_max_file_size_bytes()
+    except (TypeError, ValueError):
+        return False
+
+
+SLOW_START_GRACE_S = _getenv_float("SLOW_START_GRACE", 12.0)  # seconds to observe
+SLOW_START_MIN_BPS = (
+    _getenv_float("SLOW_START_MIN_KB", 250.0) * 1024
+)  # bytes/s threshold
 
 _log = get_logger("downloader")
 
@@ -100,7 +164,7 @@ _URL_NORMALIZERS = [
 
 def _normalize_url(url: str) -> str:
     """Rewrite known subdomain issues so yt-dlp picks the right extractor."""
-    for pattern, repl in _URL_NORMALIZERS:
+    for pattern, _repl in _URL_NORMALIZERS:
         if pattern.search(url):
             # replace the subdomain with www.
             head = url.split("//", 1)
@@ -192,7 +256,7 @@ def _extract_with_retry(url: str, ydl_opts: dict, headers_used: dict | None = No
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
-    except yt_dlp.utils.DownloadError as e:
+    except yt_dlp.utils.DownloadError as e:  # pi-lens-ignore: no-boolean-in-except
         msg = str(e)
         if _is_blocked_error(msg) and not (headers_used or {}).get("User-Agent"):
             _log.warning(
@@ -259,10 +323,14 @@ def _get_downloader_opts() -> dict:
 
     # 2. HTTP chunk size for the native downloader: split in range da 10MB
     # (default) => download parallelo dei range anche senza aria2c.
-    chunk = os.getenv("HTTP_CHUNK_SIZE", str(10 * 1024 * 1024)).strip()
+    chunk = (os.getenv("HTTP_CHUNK_SIZE", str(10 * 1024 * 1024)) or "").strip()
     if chunk:
-        opts["http_chunk_size"] = int(chunk)
-        _log.info("http_chunk_size impostato a %s", chunk)
+        try:
+            opts["http_chunk_size"] = int(chunk)
+        except ValueError:
+            _log.warning("HTTP_CHUNK_SIZE non valido: %r (uso default yt-dlp)", chunk)
+        else:
+            _log.info("http_chunk_size impostato a %s", chunk)
 
     # 3. External downloader (e.g. aria2c for direct HTTP/FTP files)
     use_aria2 = os.getenv("USE_ARIA2", "true").strip().lower() in ("true", "1", "yes")
@@ -361,7 +429,7 @@ def extract_info(url: str, extra_headers: dict | None = None) -> dict | list[dic
             "filesize_approx": info.get("filesize_approx", 0),
         }
 
-    except yt_dlp.utils.DownloadError as e:
+    except yt_dlp.utils.DownloadError as e:  # pi-lens-ignore: no-boolean-in-except
         msg = str(e)
         lowered = msg.lower()
         # Content that is not freely available -> clear message, no fallback.
@@ -385,21 +453,18 @@ def extract_info(url: str, extra_headers: dict | None = None) -> dict | list[dic
             raise VideoUnavailableError(
                 "Video riservato a membri/abbonati del canale (contenuto a pagamento): "
                 "non è liberamente disponibile dalla sorgente, quindi non lo scarico."
-            )
+            ) from e
         if "private video" in lowered or "video unavailable" in lowered:
             raise VideoUnavailableError(
                 "Video non accessibile (privato o non disponibile)."
-            )
-        if "this video is not available" in lowered:
+            ) from e
+        if _VIDEO_NOT_AVAILABLE in lowered:
             raise VideoUnavailableError(
                 "Video non disponibile (potrebbe essere geo-bloccato)."
-            )
-        raise ExtractError(f"Link non supportato o video non disponibile: {msg}")
+            ) from e
+        raise ExtractError(f"Link non supportato o video non disponibile: {msg}") from e
     except Exception as e:
-        raise ExtractError(f"Errore durante l'estrazione: {str(e)}")
-
-
-import time
+        raise ExtractError(f"Errore durante l'estrazione: {str(e)}") from e
 
 
 def probe_video_metadata(filepath: str) -> tuple[int, int, int]:
@@ -480,6 +545,43 @@ def check_dependencies() -> tuple[bool, str]:
             False,
             "ffmpeg non è installato. Installa da: https://ffmpeg.org/download.html",
         )
+
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return (
+                False,
+                "ffprobe non funzionante (serve per i metadati video). Reinstalla ffmpeg.",
+            )
+    except FileNotFoundError:
+        return (
+            False,
+            "ffprobe non trovato (serve per i metadati video). Reinstalla ffmpeg.",
+        )
+
+    if os.getenv("USE_ARIA2", "true").strip().lower() in ("true", "1", "yes"):
+        try:
+            result = subprocess.run(
+                ["aria2c", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return (
+                    False,
+                    "aria2c non funzionante ma USE_ARIA2=true. Installalo o disattivalo.",
+                )
+        except FileNotFoundError:
+            return (
+                False,
+                "aria2c non installato ma USE_ARIA2=true. Installalo o disattivalo.",
+            )
 
     return True, ""
 
@@ -569,6 +671,36 @@ def _ensure_mp4_ext(filepath: str) -> str:
         return filepath
 
 
+def _stream_response_to_file(r, f, progress_callback) -> int:
+    """Copy an open HTTP response ``r`` into the open binary file ``f``.
+
+    Returns the downloaded byte count. A CancelDownload raised by the
+    progress callback propagates untouched (it is not an OSError).
+    """
+    try:
+        total = int(r.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    downloaded = 0
+    started = time.time()
+    while True:
+        chunk = r.read(256 * 1024)
+        if not chunk:
+            break
+        f.write(chunk)
+        downloaded += len(chunk)
+        elapsed = max(time.time() - started, 0.001)
+        speed = downloaded / elapsed / 1048576
+        eta = (
+            (total - downloaded) / (speed * 1048576)
+            if total and speed > 0
+            else None
+        )
+        if progress_callback:
+            progress_callback(downloaded / 1048576, total / 1048576, speed, eta)
+    return downloaded
+
+
 def _download_direct_http(
     url: str,
     progress_callback,
@@ -586,12 +718,15 @@ def _download_direct_http(
     """
     import urllib.request
 
-    os.makedirs("downloads", exist_ok=True)
+    try:
+        os.makedirs("downloads", exist_ok=True)
+    except OSError as e:
+        raise DownloadError(f"cartella download non scrivibile: {e}") from e
     safe_title = re.sub(r"[^\w\s.-]", "", title or "").strip()
-    base = safe_title[:100] or f"video_{int(time.time())}"
+    base = safe_title[:100] or f"video_{time.time_ns()}"
     out_path = os.path.join("downloads", f"{base}.mp4")
     if os.path.exists(out_path):
-        out_path = os.path.join("downloads", f"{base}_{int(time.time())}.mp4")
+        out_path = os.path.join("downloads", f"{base}_{time.time_ns()}.mp4")
 
     req_headers = {"User-Agent": _DEFAULT_UA, "Accept": "*/*"}
     for k in ("User-Agent", "Referer", "Cookie"):
@@ -599,34 +734,19 @@ def _download_direct_http(
             req_headers[k] = extra_headers[k]
 
     req = urllib.request.Request(url, headers=req_headers)  # pi-lens-ignore: S310
-    started = time.time()
     downloaded = 0
     _log.info("Download HTTP diretto: %s -> %s", url[:90], os.path.basename(out_path))
     with urllib.request.urlopen(req, timeout=60) as r:  # pi-lens-ignore: S310
-        total = int(r.headers.get("Content-Length") or 0)
-        with open(out_path, "wb") as f:
-            while True:
-                chunk = r.read(256 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                elapsed = max(time.time() - started, 0.001)
-                speed = downloaded / elapsed / 1048576
-                eta = (
-                    (total - downloaded) / (speed * 1048576)
-                    if total and speed > 0
-                    else None
-                )
-                if progress_callback:
-                    progress_callback(
-                        downloaded / 1048576, total / 1048576, speed, eta
-                    )
+        try:
+            with open(out_path, "wb") as f:
+                downloaded = _stream_response_to_file(r, f, progress_callback)
+        except OSError as e:
+            raise DownloadError(f"scrittura fallita: {e}") from e
     if downloaded == 0:
         try:
             os.remove(out_path)
-        except OSError:
-            pass
+        except OSError as e:
+            _log.debug("cleanup file vuoto fallito: %s", e)
         raise DownloadError("HTTP diretto: risposta vuota dal CDN")
     _log.info("Download HTTP diretto completato: %s (%.1f MB)", out_path, downloaded / 1048576)
     return out_path
@@ -761,7 +881,11 @@ def download_video(
                 _log.info("Download completato: %s", filename)
                 return filename
 
-        except _SlowStartError:
+        except CancelDownload:
+            # Cooperative /stop from a progress callback: never swallow into
+            # last_error, never retry — propagate to the caller's cancel path.
+            raise
+        except _SlowStartError:  # pi-lens-ignore: no-boolean-in-except
             last_error = "slow start"
             # Boost parallelism: each slow start doubles the concurrent
             # fragments (up to 64) so throttled per-connection CDNs still
@@ -770,7 +894,7 @@ def download_video(
             boosted = min(cur * 2, 64)
             ydl_opts["concurrent_fragment_downloads"] = boosted
             _log.info("Riavvio con %d fragment concorrenti (era %d)", boosted, cur)
-        except yt_dlp.utils.DownloadError as e:
+        except yt_dlp.utils.DownloadError as e:  # pi-lens-ignore: no-boolean-in-except
             last_error = str(e)
             # Gateway .php (es. x-video.tube/storage2): yt-dlp blocca
             # l'estensione insolita per sicurezza (GHSA-79w7-vh3h-8g4j) ma
@@ -784,7 +908,7 @@ def download_video(
             # and don't have a 360p variant. If the requested quality is not
             # available, fall back to "best" once so the user still gets a video.
             if (
-                "Requested format is not available" in last_error
+                _FMT_NOT_AVAILABLE in last_error
                 and ydl_opts.get("format") != "best"
             ):
                 _log.warning(
@@ -833,8 +957,12 @@ def cleanup_orphan_files(download_dir: str = "downloads") -> list[str]:
     Returns list of removed file paths.
     """
     removed = []
+    try:
+        entries = os.listdir(download_dir)
+    except OSError:
+        return removed
     if os.path.isdir(download_dir):
-        for f in os.listdir(download_dir):
+        for f in entries:
             path = os.path.join(download_dir, f)
             if os.path.isfile(path) and f != ".gitkeep":
                 try:
@@ -878,8 +1006,8 @@ def _http_get_bytes(url: str, headers: dict, timeout: int = 20) -> bytes:
     """GET with UA+Referer (required by the supjav CDN)."""
     import urllib.request
 
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    req = urllib.request.Request(url, headers=headers)  # pi-lens-ignore: S310
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # pi-lens-ignore: S310
         return r.read()
 
 
@@ -888,7 +1016,15 @@ def _pick_mouflon_quality(variants: list[tuple[str, str]], quality: str) -> str:
     (360/720/1080/max) to the closest available variant."""
     if not variants:
         return ""
-    heights = {int(n[:-1]): u for n, u in variants}
+    heights: dict[int, str] = {}
+    for n, u in variants:
+        # NAME proviene dalla playlist del CDN (input esterno): parsing difensivo.
+        try:
+            heights[int(n[:-1])] = u
+        except (TypeError, ValueError):
+            continue
+    if not heights:
+        return ""
     target = {"360": 360, "720": 720, "1080": 1080, "max": 99999}.get(quality, 720)
     chosen = None
     for h in sorted(heights):
@@ -922,8 +1058,8 @@ def _download_mouflon_relay(
         "Accept": "*/*",
     }
 
-    max_record = int(os.getenv("SUPJAV_MAX_RECORD_SEC", "5400"))  # default 90 min
-    idle_stop = int(os.getenv("SUPJAV_IDLE_SEC", "25"))  # relay ended?
+    max_record = _getenv_int("SUPJAV_MAX_RECORD_SEC", 5400)  # default 90 min
+    idle_stop = _getenv_int("SUPJAV_IDLE_SEC", 25)  # relay ended?
 
     # ── resolve master → variant + pkey ────────────────────────────────────
     if "/master/" in master_or_media_url:
@@ -970,6 +1106,9 @@ def _download_mouflon_relay(
 
     # ── poll loop: collect + download new segments in real time ────────────
     tmpdir = tempfile.mkdtemp(prefix="supjav_")
+    # One pool for the whole recording: spawning 6 threads every 3s for up
+    # to 90 minutes churns threads and TLS sessions needlessly.
+    ex = ThreadPoolExecutor(max_workers=6)
     segments: dict[int, tuple[str, str]] = {}  # seq -> (url, local file)
     init_url: str | None = None
     init_file: str | None = None
@@ -988,7 +1127,7 @@ def _download_mouflon_relay(
 
             # fetch media playlist (rotate pkey if it stops leaking URIs)
             text = ""
-            for attempt in range(len(pkeys) + 1):
+            for _attempt in range(len(pkeys) + 1):
                 pk = pkeys[pkey_idx % len(pkeys)] if pkeys else ""
                 try:
                     text = _http_get_bytes(_media_url_with_pkey(pk), headers).decode()
@@ -1030,29 +1169,28 @@ def _download_mouflon_relay(
 
             if new_uris:
                 quiet_since = None
-                with ThreadPoolExecutor(max_workers=6) as ex:
-                    futs = {
-                        ex.submit(
-                            _http_get_bytes,
-                            uri,
-                            headers,
-                        ): seq
-                        for seq, uri in new_uris
-                    }
-                    for fut in as_completed(futs):
-                        seq = futs[fut]
-                        try:
-                            data = fut.result()
-                        except Exception as e:
-                            _log.warning("supjav: segmento %s fallito: %s", seq, e)
-                            continue
-                        fname = os.path.join(tmpdir, f"seg_{seq:08d}.mp4")
-                        with open(fname, "wb") as f:
-                            f.write(data)
-                        with dl_lock:
-                            segments[seq] = (segments[seq][0], fname)
-                            downloaded_bytes += len(data)
-                            speed_win.append((time.time(), len(data)))
+                futs = {
+                    ex.submit(
+                        _http_get_bytes,
+                        uri,
+                        headers,
+                    ): seq
+                    for seq, uri in new_uris
+                }
+                for fut in as_completed(futs):
+                    seq = futs[fut]
+                    try:
+                        data = fut.result()
+                    except Exception as e:
+                        _log.warning("supjav: segmento %s fallito: %s", seq, e)
+                        continue
+                    fname = os.path.join(tmpdir, f"seg_{seq:08d}.mp4")
+                    with open(fname, "wb") as f:
+                        f.write(data)
+                    with dl_lock:
+                        segments[seq] = (segments[seq][0], fname)
+                        downloaded_bytes += len(data)
+                        speed_win.append((time.time(), len(data)))
                 if progress_callback:
                     now = time.time()
                     speed_win[:] = [(t, b) for t, b in speed_win if now - t <= 5]
@@ -1123,4 +1261,5 @@ def _download_mouflon_relay(
         _log.info("supjav: video ok %s (%d segments)", raw_out, len(segments))
         return raw_out
     finally:
+        ex.shutdown(wait=False, cancel_futures=True)
         shutil.rmtree(tmpdir, ignore_errors=True)
