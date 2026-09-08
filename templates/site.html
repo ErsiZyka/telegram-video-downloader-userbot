@@ -125,9 +125,26 @@
   footer{max-width:620px; margin:0 auto; padding:18px 22px 26px; font-family:var(--mono);
     font-size:10.5px; color:var(--muted); border-top:1px solid var(--line);}
   nav.phonebar{display:none;}
+  .miniplayer{display:none;}
+  .miniplayer[hidden]{display:none !important;}
+  .sheet-back{position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:40;
+    opacity:0; pointer-events:none; transition:opacity .2s;}
+  .sheet-back.on{opacity:1; pointer-events:auto;}
+  .sheet{position:fixed; left:0; right:0; bottom:0; z-index:41;
+    background:var(--surface); border-top:1px solid var(--line-dark);
+    border-radius:16px 16px 0 0; padding:10px 18px calc(18px + env(safe-area-inset-bottom));
+    transform:translateY(105%); transition:transform .25s; max-width:620px; margin:0 auto;}
+  .sheet.on{transform:translateY(0);}
+  .sheet h3{font-family:var(--serif); font-weight:400; font-size:18px; margin-bottom:6px;}
+  .sheet p{font-size:13.5px; color:var(--muted); margin-bottom:14px;}
+  .toast{position:fixed; left:50%; transform:translateX(-50%) translateY(20px); z-index:60;
+    background:var(--ink); color:#161513; font-size:13.5px; font-weight:600;
+    border-radius:99px; padding:10px 18px; opacity:0; pointer-events:none;
+    transition:all .25s; max-width:88vw; text-align:center;}
+  .toast.on{opacity:1; transform:translateX(-50%) translateY(0);}
   @media (max-width:640px){
     nav.topnav{display:none;}
-    .wrap{padding-bottom:110px;}
+    .wrap{padding-bottom:130px;}
     footer{display:none;}
     nav.phonebar{display:flex; position:fixed; top:auto; bottom:0; left:0; right:0; z-index:10;
       background:rgba(22,21,19,.97);
@@ -142,6 +159,19 @@
       background:var(--acc); color:#0B0F14; font-size:10px; font-weight:700;
       margin-left:4px; vertical-align:1px;}
   .bdg[hidden]{display:none;}
+    .miniplayer[hidden]{display:none !important;}
+    .miniplayer{display:flex; position:fixed; left:10px; right:10px; bottom:calc(70px + env(safe-area-inset-bottom));
+      z-index:9; background:var(--surface); border:1px solid var(--line-dark);
+      border-radius:12px; padding:10px 14px; align-items:center; gap:12px;
+      box-shadow:0 6px 24px rgba(0,0,0,.45); cursor:pointer;}
+    .miniplayer .mp-txt{flex:1; min-width:0;}
+    .miniplayer .mp-t{font-size:13.5px; font-weight:600; white-space:nowrap;
+      overflow:hidden; text-overflow:ellipsis;}
+    .miniplayer .mp-d{font-family:var(--mono); font-size:11px; color:var(--muted);}
+    .miniplayer .rule{margin-top:6px;}
+    .miniplayer .spinner{width:18px; height:18px; border:2px solid var(--line-dark);
+      border-top-color:var(--acc); border-radius:50%; animation:spin 1s linear infinite; flex-shrink:0;}
+    @keyframes spin{to{transform:rotate(360deg)}}
   }
   @media (max-width:480px){
     .mast h1{font-size:26px;}
@@ -253,6 +283,25 @@
   <button data-p="p-hist">Crono<span class="bdg" id="bdgH" hidden></span></button>
   <button data-p="p-up">File</button>
 </nav>
+<div class="miniplayer" id="miniplayer" hidden>
+  <div class="spinner"></div>
+  <div class="mp-txt">
+    <div class="mp-t" id="mp-t"></div>
+    <div class="mp-d" id="mp-d"></div>
+    <div class="rule live"><i id="mp-bar"></i></div>
+  </div>
+  <button class="mini danger" id="mp-stop">✕</button>
+</div>
+<div class="sheet-back" id="sheet-back"></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true">
+  <h3 id="sheet-t">Conferma</h3>
+  <p id="sheet-d"></p>
+  <div class="btnrow">
+    <button class="btn2" id="sheet-no">Annulla</button>
+    <button class="btn2 danger" id="sheet-yes">Conferma</button>
+  </div>
+</div>
+<div class="toast" id="toast" role="status"></div>
 
 <script>
 "use strict";
@@ -271,20 +320,19 @@ const buzz = ms => { try { if (navigator.vibrate) navigator.vibrate(ms); } catch
 
 /* tabs */
 $$("nav button").forEach(b => {
-  b.onclick = () => {
-    $$("nav button").forEach(x => x.classList.toggle("on", x.dataset.p === b.dataset.p));
-    $$(".page").forEach(x => x.classList.remove("on"));
-    document.getElementById(b.dataset.p).classList.add("on");
-    window.scrollTo(0, 0);
-  };
+  b.onclick = () => switchTo(b.dataset.p);
 });
 /* quality */
 let quality = "720";
+try { quality = localStorage.getItem("vd_quality") || quality; } catch (e) {}
+$$("#qseg button").forEach(b => b.classList.toggle("on", b.dataset.q === quality));
 $$("#qseg button").forEach(b => {
   b.onclick = () => {
     $$("#qseg button").forEach(x => x.classList.remove("on"));
     b.classList.add("on");
     quality = b.dataset.q;
+    try { localStorage.setItem("vd_quality", quality); } catch (e) {}
+    buzz(8);
   };
 });
 /* link rows */
@@ -310,6 +358,60 @@ $("#addlink").onclick = () => addLinkRow("");
 addLinkRow("");
 /* state */
 let lastState = null;
+try { quality = localStorage.getItem("vd_quality") || quality; } catch (e) {}
+$$("#qseg button").forEach(b => b.classList.toggle("on", b.dataset.q === quality));
+$$("#qseg button").forEach(b => {
+  b.onclick = () => {
+    $$("#qseg button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    quality = b.dataset.q;
+    try { localStorage.setItem("vd_quality", quality); } catch (e) {}
+    buzz(8);
+  };
+});
+/* toast + sheet */
+let toastTimer = null;
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("on");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("on"), 2600);
+}
+function confirmSheet(title, desc, onYes) {
+  $("#sheet-t").textContent = title;
+  $("#sheet-d").textContent = desc;
+  const sheet = $("#sheet"), back = $("#sheet-back");
+  const close = () => { sheet.classList.remove("on"); back.classList.remove("on"); };
+  $("#sheet-yes").onclick = () => { close(); buzz(12); onYes(); };
+  $("#sheet-no").onclick = close;
+  back.onclick = close;
+  sheet.classList.add("on"); back.classList.add("on");
+}
+/* miniplayer */
+function updateMiniplayer(current, progress) {
+  const mp = $("#miniplayer");
+  if (!current || !progress || !progress[current.url]) { mp.hidden = true; return; }
+  const pr = progress[current.url];
+  const pct = Math.max(0, Math.min(100, Number(pr.pct || 0)));
+  $("#mp-t").textContent = jobTitle(current);
+  $("#mp-d").textContent = (pr.phase === "upload" ? "Upload" : "Download") +
+    " · " + Math.round(pct) + "% · " + fmtMB(Number(pr.received || 0));
+  $("#mp-bar").style.width = pct + "%";
+  mp.hidden = false;
+}
+$("#miniplayer").addEventListener("click", e => {
+  if (e.target.id === "mp-stop") return;
+  switchTo("p-queue");
+});
+$("#mp-stop").onclick = () => confirmSheet("Ferma il download?",
+  "Il download corrente verrà interrotto.", async () => { await post("api/cancel", {}); toast("Stop inviato"); refresh(); });
+function switchTo(p) {
+  $$("nav button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
+  $$(".page").forEach(x => x.classList.toggle("on", x.id === p));
+  if (p === "p-dl") { $("#miniplayer").hidden = true; }
+  window.scrollTo(0, 0);
+}
 function fmtMB(mb) {
   if (mb >= 1024) return (mb / 1024).toFixed(1) + " GB";
   return mb.toFixed(1) + " MB";
@@ -354,10 +456,11 @@ function renderQueue(items) {
     const s = document.createElement("small");
     s.textContent = (it.quality || "") + (it.target_channel ? " → " + it.target_channel : "");
     nm.appendChild(b); nm.appendChild(s);
-    const up = document.createElement("button"); up.className = "mini"; up.textContent = "↑";
-    up.onclick = async () => { await post("api/priority", {url: it.url}); refresh(); };
-    const del = document.createElement("button"); del.className = "mini danger"; del.textContent = "×";
-    del.onclick = async () => { await post("api/cancel", {job: it.url}); refresh(); };
+    const up = document.createElement("button"); up.className = "mini"; up.textContent = "↑ Priorità";
+    up.onclick = async () => { await post("api/priority", {url: it.url}); toast("Messo primo"); buzz(10); refresh(); };
+    const del = document.createElement("button"); del.className = "mini danger"; del.textContent = "× Rimuovi";
+    del.onclick = () => confirmSheet("Rimuovere dalla coda?",
+      jobTitle(it), async () => { await post("api/cancel", {job: it.url}); toast("Rimosso"); refresh(); });
     row.appendChild(nm); row.appendChild(up); row.appendChild(del);
     box.appendChild(row);
   });
@@ -397,11 +500,8 @@ function renderHistory(entries) {
     if (en.status !== "ok") {
       const rb = document.createElement("button"); rb.className = "mini"; rb.textContent = "Riprova";
       rb.onclick = () => {
-        document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x.dataset.p === "p-dl"));
-        $$(".page").forEach(x => x.classList.remove("on"));
-        $("#p-dl").classList.add("on");
+        switchTo("p-dl");
         addLinkRow(en.url);
-        window.scrollTo(0, 0);
       };
       row.appendChild(rb);
     }
@@ -434,10 +534,11 @@ function renderChannels(channels) {
       row.appendChild(t);
     } else {
       const del = document.createElement("button"); del.className = "mini danger"; del.textContent = "Rimuovi";
-      del.onclick = async () => {
-        await fetch("api/channels/" + encodeURIComponent(c.id), {method: "DELETE"});
-        refresh();
-      };
+      del.onclick = () => confirmSheet("Rimuovere il canale?",
+        c.label, async () => {
+          await fetch("api/channels/" + encodeURIComponent(c.id), {method: "DELETE"});
+          toast("Canale rimosso"); refresh();
+        });
       row.appendChild(del);
     }
     box.appendChild(row);
@@ -470,6 +571,7 @@ async function refresh() {
   renderStatus(st.current, st.progress || {});
   renderHistory(st.history || []);
   renderConfirms(st.history || []);
+  updateMiniplayer(st.current, st.progress || {});
   const bq = document.getElementById("bdgQ");
   const nq = (st.items || []).length;
   bq.hidden = !nq; bq.textContent = nq;
@@ -515,10 +617,12 @@ async function doEnqueue() {
   if (!toQueue.length) { btn.disabled = false; msg.textContent = pendConfirm.length ? "Alcuni link sono già stati scaricati: confermali sotto." : "Niente da accodare."; return; }
   const q = await post("api/enqueue", {urls: toQueue, quality, channel, titles});
   btn.disabled = false;
-  if (q.status !== 200 || !q.body.ok) { msg.textContent = "Errore di accodamento."; refresh(); return; }
+  if (q.status !== 200 || !q.body.ok) { toast("Errore di accodamento"); refresh(); return; }
   const errs = q.body.results.filter(r => r.error);
   msg.textContent = errs.length ? ("Accodati con " + errs.length + " errori.") : ("Accodati " + toQueue.length + " video.");
   buzz(20);
+  toast(errs.length ? (errs.length + " errori, resto accodato") : ("\u2713 " + toQueue.length + " video in coda"));
+  rows.forEach(r => { r.inp.value = ""; r.st.textContent = ""; });
   refresh();
 }
 $("#dlform").addEventListener("submit", e => { e.preventDefault(); doEnqueue(); });
@@ -536,7 +640,7 @@ function showConfirms(items, titles, channel) {
     const yes = document.createElement("button"); yes.className = "mini"; yes.textContent = "Sì, ricarica";
     yes.onclick = async () => {
       await post("api/enqueue", {urls: [it.url], quality, channel, titles});
-      row.remove(); refresh();
+      row.remove(); toast("Ricarica avviata"); refresh();
     };
     const no = document.createElement("button"); no.className = "mini"; no.textContent = "No";
     no.onclick = () => row.remove();
@@ -554,12 +658,15 @@ $("#chanform").addEventListener("submit", async e => {
   if (!v) return;
   const r = await post("api/channels", {id: v});
   msg.textContent = r.body.ok ? "Canale collegato." : ("Errore: " + (r.body.error || "?"));
+  if (r.body.ok) { toast("Canale collegato"); buzz(12); }
   $("#newchan").value = "";
   refresh();
 });
 /* queue ops */
-$("#stopbtn").onclick = async () => { await post("api/cancel", {}); refresh(); };
-$("#clearbtn").onclick = async () => { await post("api/clear", {}); refresh(); };
+$("#stopbtn").onclick = () => confirmSheet("Ferma il download?",
+  "Il download corrente verrà interrotto.", async () => { await post("api/cancel", {}); toast("Stop inviato"); refresh(); });
+$("#clearbtn").onclick = () => confirmSheet("Svuotare tutta la coda?",
+  "Tutti gli item in attesa verranno rimossi.", async () => { await post("api/clear", {}); toast("Coda svuotata"); refresh(); });
 /* upload */
 $("#drop").onclick = () => $("#filepick").click();
 $("#upbtn").onclick = async () => {
