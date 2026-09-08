@@ -660,6 +660,27 @@ async def download_and_upload(
 # ─── Queue worker ───
 
 
+async def _upload_site_file(client, status_msg, item, channel_id) -> None:
+    """Upload a file placed on disk by the website (kind="upload").
+
+    No download happens: the file is already complete in downloads/.
+    Same lifecycle as the /save reupload path (leftover files are reaped
+    by the orphan cleanup).
+    """
+    url = item.get("url", "")
+    title = item.get("title", "Video") or "Video"
+    filepath = item.get("filepath", "")
+    if not filepath or not os.path.exists(filepath):
+        _clear_progress()
+        await _safe_edit(status_msg, "❌ File non più presente. Reinvialo dal sito.")
+        try:
+            _get_history().set_error(url, "file upload mancante", title)
+        except Exception:
+            _log("history save fallito (ignorato)")
+        return
+    await _upload_existing(client, None, status_msg, filepath, title, channel_id, url)
+
+
 async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
     """Process the queue sequentially: peek -> download+upload -> remove.
 
@@ -712,21 +733,34 @@ async def _queue_worker(client, channel_id: int, owner_id: int) -> None:
                     )
                     status_msg = None
             kind = item.get("kind", "web")
+            # Per-job destination (website multi-channel): falls back to the
+            # bot's default channel when the item carries no target.
+            target = item.get("target_channel") or channel_id
             if kind == "saved":
                 await download_and_upload_saved(
-                    client, status_msg, item, channel_id, owner_id
+                    client, status_msg, item, target, owner_id
                 )
-            else:
+            elif kind == "upload":
+                await _upload_site_file(client, status_msg, item, target)
+            elif kind == "web" or not kind:
                 await download_and_upload(
                     client,
                     status_msg,
                     url,
                     quality,
                     title,
-                    channel_id,
+                    target,
                     owner_id,
                     headers=headers,
                 )
+            else:
+                _log(f"Worker: kind non supportato {kind!r} per {url}")
+                try:
+                    _get_history().set_error(
+                        url, f"kind non supportato: {kind}", title
+                    )
+                except Exception:
+                    _log("history save fallito (ignorato)")
         except Exception as e:
             _log(f"Worker errore inatteso su {url}: {e!r}")
         finally:
