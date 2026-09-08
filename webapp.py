@@ -208,6 +208,21 @@ async def _index():
     return FileResponse(page, media_type="text/html; charset=utf-8")
 
 
+@app.get(PREFIX + "/manifest.json")
+def _manifest():
+    return {"name": "Videodownloader", "short_name": "VideoDL",
+            "start_url": ".", "display": "standalone",
+            "background_color": "#161513", "theme_color": "#161513",
+            "icons": [{"src": "icon.svg", "sizes": "any",
+                         "type": "image/svg+xml"}]}
+
+
+@app.get(PREFIX + "/icon.svg")
+async def _icon():
+    return FileResponse(os.path.join(HERE, "templates", "icon.svg"),
+                        media_type="image/svg+xml")
+
+
 def _offline() -> JSONResponse:
     return JSONResponse({"ok": False, "error": "bot offline"}, status_code=502)
 

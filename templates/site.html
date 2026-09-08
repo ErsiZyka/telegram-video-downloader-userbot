@@ -2,7 +2,13 @@
 <html lang="it">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#161513">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
 <title>Videodownloader</title>
 <style>
   :root{
@@ -15,7 +21,10 @@
   }
   *{box-sizing:border-box; margin:0; padding:0;}
   body{background:var(--paper); color:var(--ink); font-family:var(--sans);
-    font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased;}
+    font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased;
+    touch-action:manipulation; -webkit-tap-highlight-color:transparent;}
+  button{-webkit-tap-highlight-color:transparent;}
+  :focus-visible{outline:2px solid var(--acc); outline-offset:2px;}
   .wrap{max-width:620px; margin:0 auto; padding:0 22px 70px;}
   .mast{padding:34px 0 6px; display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap;}
   .mast h1{font-family:var(--serif); font-weight:400; font-size:30px; letter-spacing:-.01em;}
@@ -47,7 +56,7 @@
   label.lbl{display:block; font-size:12px; letter-spacing:.06em; text-transform:uppercase;
     color:var(--muted); margin:16px 0 7px;}
   input[type=text], select{width:100%; background:var(--surface); border:1px solid var(--line-dark);
-    color:var(--ink); border-radius:8px; padding:11px 12px; font-size:15px; outline:none; font-family:var(--sans);}
+    color:var(--ink); border-radius:8px; padding:11px 12px; font-size:16px; outline:none; font-family:var(--sans);}
   input:focus, select:focus{border-color:var(--muted);}
   input::placeholder{color:#5C564A;}
   .linkrow{display:flex; gap:8px; margin-bottom:8px;}
@@ -66,6 +75,8 @@
   .cta{width:100%; background:var(--ink); border:0; color:#161513; font-size:15px;
     font-weight:700; letter-spacing:.02em; border-radius:8px; padding:13px; margin-top:18px; cursor:pointer;}
   .cta:hover{background:#fff;}
+  .cta:active{transform:scale(.99);}
+  .btn2:active,.mini:active{transform:scale(.97);}
   .cta:disabled{opacity:.5; cursor:wait;}
   .btn2{flex:1; background:none; border:1px solid var(--line-dark); color:var(--ink);
     border-radius:8px; padding:10px; font-size:13.5px; cursor:pointer;}
@@ -126,6 +137,11 @@
       display:flex; flex-direction:column; align-items:center; gap:4px;}
     nav.phonebar button svg{margin:0; display:block;}
     nav.phonebar button.on{color:var(--ink);}
+    nav.phonebar button{min-height:58px;}
+    .bdg{display:inline-block; min-width:18px; padding:1px 5px; border-radius:99px;
+      background:var(--acc); color:#0B0F14; font-size:10px; font-weight:700;
+      margin-left:4px; vertical-align:1px;}
+  .bdg[hidden]{display:none;}
   }
   @media (max-width:480px){
     .mast h1{font-size:26px;}
@@ -139,7 +155,7 @@
     <h1><span class="dot"></span>Video<em>downloader</em></h1>
     <small>LAN · :8090</small>
   </div>
-  <div class="offline" id="offline">Bot non raggiungibile — controlla che videobot sia attivo.</div>
+  <div class="offline" id="offline" role="alert">Bot non raggiungibile — controlla che videobot sia attivo.</div>
 
   <nav class="topnav" id="topnav">
     <button data-p="p-dl" class="on">Download</button>
@@ -152,8 +168,9 @@
   <section class="page on" id="p-dl">
     <div class="sec">
       <div class="kicker"><span class="n">01</span>Nuovo download</div>
+      <form id="dlform" action="javascript:void(0)">
       <div id="links"></div>
-      <button class="addrow" id="addlink">+ Aggiungi link (batch)</button>
+      <button type="button" class="addrow" id="addlink">+ Aggiungi link (batch)</button>
       <label class="lbl" for="chansel">Canale</label>
       <select id="chansel"></select>
       <label class="lbl">Qualità</label>
@@ -163,8 +180,9 @@
         <button data-q="1080">1080p</button>
         <button data-q="max">Max</button>
       </div>
-      <button class="cta" id="dlbtn">Scarica</button>
-      <div class="note" id="dlmsg"></div>
+      <button type="submit" class="cta" id="dlbtn">Scarica</button>
+      <div class="note" id="dlmsg" role="status"></div>
+      </form>
     </div>
     <div class="sec">
       <div class="kicker"><span class="n">02</span>In corso</div>
@@ -185,7 +203,9 @@
       <div class="kicker"><span class="n">02</span>Collega canale</div>
       <h2 class="title">Un nuovo canale in dieci secondi.</h2>
       <p class="sub">ID numerico o @username. Il bot deve esserne admin.</p>
-      <div class="inline-form"><input type="text" id="newchan" placeholder="-100… oppure @nome"><button id="addchan" aria-label="Aggiungi">→</button></div>
+      <form id="chanform" action="javascript:void(0)">
+      <div class="inline-form"><input type="text" id="newchan" placeholder="-100… oppure @nome" autocapitalize="off" autocomplete="off" spellcheck="false"><button type="submit" id="addchan" aria-label="Aggiungi">→</button></div>
+      </form>
       <div class="note" id="chanmsg"></div>
     </div>
   </section>
@@ -229,8 +249,8 @@
 <nav class="phonebar" id="phonebar">
   <button data-p="p-dl" class="on">Download</button>
   <button data-p="p-chan">Canali</button>
-  <button data-p="p-queue">Coda</button>
-  <button data-p="p-hist">Crono</button>
+  <button data-p="p-queue">Coda<span class="bdg" id="bdgQ" hidden></span></button>
+  <button data-p="p-hist">Crono<span class="bdg" id="bdgH" hidden></span></button>
   <button data-p="p-up">File</button>
 </nav>
 
@@ -247,6 +267,7 @@ async function api(path, opts) {
 }
 const get = p => api(p);
 const post = (p, b) => api(p, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(b || {})});
+const buzz = ms => { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {} };
 
 /* tabs */
 $$("nav button").forEach(b => {
@@ -272,8 +293,11 @@ function addLinkRow(value) {
   d.className = "linkrow";
   const inp = document.createElement("input");
   inp.type = "text"; inp.placeholder = "https://…"; inp.value = value || "";
+  inp.inputMode = "url"; inp.autocapitalize = "off";
+  inp.autocomplete = "off"; inp.spellcheck = false;
   const st = document.createElement("div");
   const btn = document.createElement("button");
+  btn.type = "button";
   btn.className = "xbtn"; btn.textContent = "×";
   btn.onclick = () => d.remove();
   d.appendChild(inp); d.appendChild(btn);
@@ -391,7 +415,7 @@ function renderChannels(channels) {
     channels.forEach((c, i) => {
       const o = document.createElement("option");
       o.value = c.id;
-      o.textContent = c.label + (i === 0 ? " — predefinito" : "");
+      o.textContent = c.label + ((i === 0 && !/predefinito/i.test(c.label)) ? " — predefinito" : "");
       el.appendChild(o);
     });
   };
@@ -446,9 +470,16 @@ async function refresh() {
   renderStatus(st.current, st.progress || {});
   renderHistory(st.history || []);
   renderConfirms(st.history || []);
+  const bq = document.getElementById("bdgQ");
+  const nq = (st.items || []).length;
+  bq.hidden = !nq; bq.textContent = nq;
+  const errs = (st.history || []).filter(e => e.status !== "ok").length;
+  const bh = document.getElementById("bdgH");
+  bh.hidden = !errs; bh.textContent = errs;
 }
 /* enqueue flow: preview -> confirm already-done -> enqueue with titles */
-$("#dlbtn").onclick = async () => {
+async function doEnqueue() {
+  buzz(10);
   const btn = $("#dlbtn"), msg = $("#dlmsg");
   const rows = Array.from($("#links").children).map(w => ({
     wrap: w, inp: w.querySelector("input"), st: w.querySelector("div:last-child")
@@ -487,8 +518,10 @@ $("#dlbtn").onclick = async () => {
   if (q.status !== 200 || !q.body.ok) { msg.textContent = "Errore di accodamento."; refresh(); return; }
   const errs = q.body.results.filter(r => r.error);
   msg.textContent = errs.length ? ("Accodati con " + errs.length + " errori.") : ("Accodati " + toQueue.length + " video.");
+  buzz(20);
   refresh();
-};
+}
+$("#dlform").addEventListener("submit", e => { e.preventDefault(); doEnqueue(); });
 function showConfirms(items, titles, channel) {
   const sec = $("#confirmsec"), list = $("#confirmlist");
   list.textContent = "";
@@ -513,7 +546,9 @@ function showConfirms(items, titles, channel) {
   });
 }
 /* channels add */
-$("#addchan").onclick = async () => {
+$("#chanform").addEventListener("submit", async e => {
+  e.preventDefault();
+  buzz(10);
   const v = $("#newchan").value.trim();
   const msg = $("#chanmsg");
   if (!v) return;
@@ -521,7 +556,7 @@ $("#addchan").onclick = async () => {
   msg.textContent = r.body.ok ? "Canale collegato." : ("Errore: " + (r.body.error || "?"));
   $("#newchan").value = "";
   refresh();
-};
+});
 /* queue ops */
 $("#stopbtn").onclick = async () => { await post("api/cancel", {}); refresh(); };
 $("#clearbtn").onclick = async () => { await post("api/clear", {}); refresh(); };

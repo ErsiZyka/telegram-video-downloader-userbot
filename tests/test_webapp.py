@@ -150,6 +150,16 @@ async def test_state_proxies_local_api(store, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_manifest_and_icon():
+    status, data = await _asgi(webapp.app, "GET", webapp.PREFIX + "/manifest.json")
+    assert status == 200
+    body = json.loads(data)
+    assert body["display"] == "standalone" and body["icons"]
+    status, data = await _asgi(webapp.app, "GET", webapp.PREFIX + "/icon.svg")
+    assert status == 200 and data.lstrip().startswith(b"<svg")
+
+
+@pytest.mark.asyncio
 async def test_state_bot_offline(store, monkeypatch):
     def _down(method, path, body=None, timeout=30):
         raise RuntimeError("bot offline: conn refused")
